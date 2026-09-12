@@ -1,15 +1,15 @@
 {
   "environment": {
-    "METIS_PLATFORM_ENDPOINT": "http://metis.internal",
+    "METIS_PLATFORM_ENDPOINT": "http://platform.example.invalid",
     "METIS_APP_ID": "caller-a7x2m",
     "METIS_APP_TOKEN": "app-token",
-    "METIS_LLM_0_ENDPOINT": "http://metis.internal/api/model-gateway",
+    "METIS_LLM_0_ENDPOINT": "http://platform.example.invalid/api/model-gateway",
     "METIS_LLM_0_MODEL": "example-chat",
     "METIS_LLM_0_API_KEY": "model-token",
     "METIS_LLM_0_CONTEXT_WINDOW": "32768",
     "METIS_LLM_0_MAX_INPUT_TOKENS": "24576",
     "METIS_LLM_0_MAX_OUTPUT_TOKENS": "8192",
-    "METIS_S3_ENDPOINT": "http://silo.internal",
+    "METIS_S3_ENDPOINT": "http://storage.example.invalid",
     "METIS_S3_REGION": "us-east-1",
     "METIS_S3_ACCESS_KEY": "app-access",
     "METIS_S3_SECRET_KEY": "app-secret",

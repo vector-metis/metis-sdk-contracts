@@ -189,7 +189,7 @@ func TestPlanCoverageAppInstallsBothArchitectures(t *testing.T) {
 	for _, architecture := range []string{contract.ArchAMD64, contract.ArchARM64} {
 		plan, err := contract.PlanInstall(bytes.NewReader(data), contract.InstallOptions{
 			Architecture: architecture, BaseDir: "/var/lib/metis/apps/coverage", ContractOnly: true,
-			PublicHost: "metis.internal", MasterIP: "10.0.0.10",
+			PublicHost: "platform.example.invalid", MasterIP: "10.0.0.10",
 			Settings: map[string]string{
 				"site_name": "Coverage", "log_level": "debug", "max_upload_mb": "64",
 				"enable_audit": "false", "webhook_token": "webhook",

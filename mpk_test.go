@@ -343,7 +343,7 @@ func TestValidateMPKRejectsExtraHosts(t *testing.T) {
 		files["compose.amd64.yaml"] = []byte(`services:
   web:
     image: demo-a7x2m/web:1.0.0
-    extra_hosts: ["example.internal:192.0.2.10"]
+    extra_hosts: ["example.invalid:192.0.2.10"]
 `)
 	})
 

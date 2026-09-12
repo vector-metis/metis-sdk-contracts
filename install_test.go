@@ -14,7 +14,7 @@ func TestPlanInstallRendersRepresentativePackage(t *testing.T) {
 	data := buildContractFixture(t, "integrated-app-a7x2m")
 	plan, err := contract.PlanInstall(bytes.NewReader(data), contract.InstallOptions{
 		Architecture: contract.ArchAMD64, BaseDir: "/var/lib/metis/apps/integrated", ContractOnly: true,
-		PublicHost: "metis.internal", MasterIP: "10.0.0.10",
+		PublicHost: "platform.example.invalid", MasterIP: "10.0.0.10",
 		Settings: map[string]string{"wiki-name": "Real Wiki"},
 		ExtraEnvironment: map[string]string{
 			"METIS_PLATFORM_ENDPOINT": "http://127.0.0.1", "METIS_APP_TOKEN": "token",
@@ -79,10 +79,10 @@ x-review-note: manually-approved
 	plan, err := contract.PlanInstall(bytes.NewReader(data), contract.InstallOptions{
 		Architecture: contract.ArchAMD64,
 		BaseDir:      "/var/lib/metis/apps/demo-a7x2m",
-		PublicHost:   "metis.internal",
+		PublicHost:   "platform.example.invalid",
 		MasterIP:     "10.0.0.10",
 		ExtraEnvironment: map[string]string{
-			"METIS_PLATFORM_ENDPOINT": "http://metis.internal",
+			"METIS_PLATFORM_ENDPOINT": "http://platform.example.invalid",
 			"METIS_APP_TOKEN":         "token",
 		},
 		AssignPort: func(string) (int, error) { return 22001, nil },
@@ -128,10 +128,10 @@ services:
 	plan, err := contract.PlanInstall(bytes.NewReader(data), contract.InstallOptions{
 		Architecture: contract.ArchAMD64,
 		BaseDir:      "/var/lib/metis/apps/identity-service-a7x2m",
-		PublicHost:   "metis.internal",
+		PublicHost:   "platform.example.invalid",
 		MasterIP:     "10.0.0.10",
 		ExtraEnvironment: map[string]string{
-			"METIS_PLATFORM_ENDPOINT": "http://metis.internal",
+			"METIS_PLATFORM_ENDPOINT": "http://platform.example.invalid",
 			"METIS_APP_TOKEN":         "shared-token",
 		},
 		AssignPort: func(string) (int, error) { return 22001, nil },
@@ -148,9 +148,9 @@ services:
 	}
 	for _, want := range []string{
 		"METIS_APP_ID: identity-service-a7x2m",
-		"METIS_PLATFORM_ENDPOINT: http://metis.internal",
+		"METIS_PLATFORM_ENDPOINT: http://platform.example.invalid",
 		"METIS_APP_TOKEN: shared-token",
-		"- metis.internal:10.0.0.10",
+		"- platform.example.invalid:10.0.0.10",
 	} {
 		if count := strings.Count(rendered, want); count != 2 {
 			t.Fatalf("rendered compose contains %q %d times, want 2\n%s", want, count, rendered)
@@ -190,10 +190,10 @@ services:
 	plan, err := contract.PlanInstall(bytes.NewReader(data), contract.InstallOptions{
 		Architecture: contract.ArchAMD64,
 		BaseDir:      "/var/lib/metis/apps/demo-a7x2m",
-		PublicHost:   "metis.internal",
+		PublicHost:   "platform.example.invalid",
 		MasterIP:     "10.0.0.10",
 		ExtraEnvironment: map[string]string{
-			"METIS_PLATFORM_ENDPOINT": "http://metis.internal",
+			"METIS_PLATFORM_ENDPOINT": "http://platform.example.invalid",
 			"METIS_APP_TOKEN":         "token",
 		},
 		AssignPort: func(name string) (int, error) {
@@ -249,12 +249,12 @@ services:
 		files["images/amd64/worker.tar"] = dockerArchive(t, "scoped-app-a7x2m/worker:1.0.0")
 	})
 	plan, err := contract.PlanInstall(bytes.NewReader(data), contract.InstallOptions{
-		Architecture: contract.ArchAMD64, BaseDir: "/var/lib/metis/apps/scoped", PublicHost: "metis.internal", MasterIP: "10.0.0.10",
+		Architecture: contract.ArchAMD64, BaseDir: "/var/lib/metis/apps/scoped", PublicHost: "platform.example.invalid", MasterIP: "10.0.0.10",
 		ModelBindings: map[string]contract.ModelSlotBinding{"llm.0": {
 			Endpoint: "http://gateway", Model: "gw-chat", APIKey: "secret",
 			CardParams: map[string]string{"CONTEXT_WINDOW": "32768", "MAX_INPUT_TOKENS": "24576", "MAX_OUTPUT_TOKENS": "8192"},
 		}},
-		ExtraEnvironment: map[string]string{"METIS_PLATFORM_ENDPOINT": "http://metis.internal", "METIS_APP_TOKEN": "token"},
+		ExtraEnvironment: map[string]string{"METIS_PLATFORM_ENDPOINT": "http://platform.example.invalid", "METIS_APP_TOKEN": "token"},
 		AssignPort:       func(string) (int, error) { return 22001, nil },
 	})
 	if err != nil {
@@ -289,14 +289,14 @@ func TestPlanPreparedInstallRewritesEveryImageReference(t *testing.T) {
 	plan, err := contract.PlanPreparedInstall(metadata, contract.InstallOptions{
 		Architecture: contract.ArchAMD64,
 		BaseDir:      "/var/lib/metis/apps/prepared-app-a7x2m",
-		PublicHost:   "metis.internal",
+		PublicHost:   "platform.example.invalid",
 		MasterIP:     "10.0.0.10",
 		ImageReferences: map[string]string{
-			"prepared-app-a7x2m/web:1.0.0":    "metis.internal/prepared-app-a7x2m/web:1.0.0",
-			"prepared-app-a7x2m/worker:1.0.0": "metis.internal/prepared-app-a7x2m/worker:1.0.0",
+			"prepared-app-a7x2m/web:1.0.0":    "platform.example.invalid/prepared-app-a7x2m/web:1.0.0",
+			"prepared-app-a7x2m/worker:1.0.0": "platform.example.invalid/prepared-app-a7x2m/worker:1.0.0",
 		},
 		ExtraEnvironment: map[string]string{
-			"METIS_PLATFORM_ENDPOINT": "http://metis.internal", "METIS_APP_TOKEN": "token",
+			"METIS_PLATFORM_ENDPOINT": "http://platform.example.invalid", "METIS_APP_TOKEN": "token",
 		},
 		AssignPort: func(string) (int, error) { return 20001, nil },
 	})
@@ -305,8 +305,8 @@ func TestPlanPreparedInstallRewritesEveryImageReference(t *testing.T) {
 	}
 	rendered := string(plan.Compose)
 	for _, target := range []string{
-		"metis.internal/prepared-app-a7x2m/web:1.0.0",
-		"metis.internal/prepared-app-a7x2m/worker:1.0.0",
+		"platform.example.invalid/prepared-app-a7x2m/web:1.0.0",
+		"platform.example.invalid/prepared-app-a7x2m/worker:1.0.0",
 	} {
 		if !strings.Contains(rendered, target) {
 			t.Fatalf("rendered compose does not contain %q:\n%s", target, rendered)
