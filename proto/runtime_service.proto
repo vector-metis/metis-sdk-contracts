@@ -1,0 +1,167 @@
+syntax = "proto3";
+
+// RuntimeService 定义安装应用读取可信上下文和声明依赖的稳定运行时契约。
+package metis.platform.v1;
+
+import "buf/validate/validate.proto";
+import "google/api/annotations.proto";
+import "google/api/httpbody.proto";
+
+option go_package = "github.com/vector-metis/metis-sdk-contracts/gen/metis/platform/v1;platformv1";
+
+// RuntimeApplicationType 是运行时向 SDK 返回的应用类型闭集。
+enum RuntimeApplicationType {
+  // 未指定的 Protobuf 零值；成功响应不使用。
+  RUNTIME_APPLICATION_TYPE_UNSPECIFIED = 0;
+  // Web 应用具有一个 HTTP/WebSocket 入口，可在 Workspace 中打开。
+  RUNTIME_APPLICATION_TYPE_WEB = 1;
+  // Service 应用只提供一个或多个 TCP/UDP endpoint。
+  RUNTIME_APPLICATION_TYPE_SERVICE = 2;
+}
+
+// RuntimeEndpointProtocol 是后端 SDK 可以发现的 Service 传输协议闭集。
+enum RuntimeEndpointProtocol {
+  // 未指定的 Protobuf 零值；成功响应不使用。
+  RUNTIME_ENDPOINT_PROTOCOL_UNSPECIFIED = 0;
+  // TCP 字节流经 Master 和 AgentHub 转发。
+  RUNTIME_ENDPOINT_PROTOCOL_TCP = 1;
+  // UDP 数据报经 Master 和 AgentHub 转发；首版接受 TCP 队头阻塞。
+  RUNTIME_ENDPOINT_PROTOCOL_UDP = 2;
+}
+
+// RuntimeActorType 表示平台入口验签后确认的调用主体。
+enum RuntimeActorType {
+  // 未指定的 Protobuf 零值；成功响应不使用。
+  RUNTIME_ACTOR_TYPE_UNSPECIFIED = 0;
+  // 当前调用来自已登录平台用户。
+  RUNTIME_ACTOR_TYPE_USER = 1;
+  // 当前调用来自声明了目标依赖的应用后端。
+  RUNTIME_ACTOR_TYPE_SERVICE = 2;
+  // 当前调用来自应用后端并明确代表一个已授权用户。
+  RUNTIME_ACTOR_TYPE_SERVICE_ON_BEHALF_OF_USER = 3;
+}
+
+// GetRuntimeContextRequest 指定正在读取自身可信上下文的应用。
+message GetRuntimeContextRequest {
+  // app_id 必须与入口路径或应用令牌中的 source app 一致。
+  string app_id = 1 [(buf.validate.field).string = {min_len: 1, max_len: 200}];
+}
+
+// RuntimeContext 是平台从会话或应用令牌重建的可信调用上下文。
+message RuntimeContext {
+  // 当前应用的稳定唯一标识。
+  string app_id = 1;
+  // 当前应用的运行时类型。
+  RuntimeApplicationType app_type = 2;
+  // 当前租户 ID；纯应用调用且未代表用户时为 0。
+  int64 tenant_id = 3;
+  // 当前用户 ID；纯应用调用时为 0。
+  int64 user_id = 4;
+  // 当前用户在租户内的角色；纯应用调用时为空。
+  string role = 5;
+  // 调用方应用 ID；用户直接访问时为空。
+  string source_app_id = 6;
+  // 平台确认的调用主体类型。
+  RuntimeActorType actor_type = 7;
+}
+
+// ListRuntimeDependenciesRequest 指定需要解析直接依赖的 source app。
+message ListRuntimeDependenciesRequest {
+  // app_id 必须与入口路径或应用令牌中的 source app 一致。
+  string app_id = 1 [(buf.validate.field).string = {min_len: 1, max_len: 200}];
+}
+
+// GetRuntimeDependencyRequest 通过 manifest alias 或精确应用 ID 选择一个直接依赖。
+message GetRuntimeDependencyRequest {
+  // app_id 是声明依赖的 source app。
+  string app_id = 1 [(buf.validate.field).string = {min_len: 1, max_len: 200}];
+  // selector 优先匹配 alias，再匹配精确应用 ID；歧义时请求失败。
+  string selector = 2 [(buf.validate.field).string = {min_len: 1, max_len: 200}];
+}
+
+// GetRuntimeDependencyEndpointRequest 选择 Service 依赖的一个具名 endpoint。
+message GetRuntimeDependencyEndpointRequest {
+  // app_id 是声明依赖的 source app。
+  string app_id = 1 [(buf.validate.field).string = {min_len: 1, max_len: 200}];
+  // selector 是目标依赖的 alias 或精确应用 ID。
+  string selector = 2 [(buf.validate.field).string = {min_len: 1, max_len: 200}];
+  // endpoint_name 是目标 Service manifest 声明的 endpoint 名称。
+  string endpoint_name = 3 [(buf.validate.field).string = {min_len: 1, max_len: 100}];
+}
+
+// RuntimeDependency 是 source app 声明的一个直接依赖及其当前可用性。
+message RuntimeDependency {
+  // 目标应用的稳定唯一标识。
+  string app_id = 1;
+  // source manifest 为目标指定的本地别名。
+  string alias = 2;
+  // true 表示安装 source app 时目标必须存在。
+  bool required = 3;
+  // 目标应用的运行时类型。
+  RuntimeApplicationType app_type = 4;
+  // true 表示目标当前满足类型对应的运行条件。
+  bool available = 5;
+  // Web 应用的同源入口根路径；Service 应用恒为空。
+  string web_base_path = 6;
+}
+
+// ListRuntimeDependenciesResponse 返回 source manifest 中按声明顺序排列的直接依赖。
+message ListRuntimeDependenciesResponse {
+  // dependencies 对后端包含 Web 和 Service；Browser SDK 只投影 Web。
+  repeated RuntimeDependency dependencies = 1;
+}
+
+// RuntimeDependencyEndpoint 是 Service 依赖经 Master 代理后的稳定调用地址。
+message RuntimeDependencyEndpoint {
+  // 目标 Service 应用的稳定唯一标识。
+  string app_id = 1;
+  // 目标 manifest 声明的 endpoint 名称。
+  string endpoint_name = 2;
+  // endpoint 使用的原始传输协议。
+  RuntimeEndpointProtocol protocol = 3;
+  // Master 的稳定部署 IP 或配置的稳定主机名。
+  string host = 4;
+  // Master 为 endpoint 持久分配的代理端口。
+  int32 port = 5;
+  // true 表示 Agent、安装期望态和 Master listener 当前均可用。
+  bool available = 6;
+}
+
+// GetBrowserSDKRequest 是读取平台内置浏览器 SDK 的空请求。
+message GetBrowserSDKRequest {}
+
+// GetBrowserSDKTypesRequest 是读取浏览器 SDK TypeScript 声明的空请求。
+message GetBrowserSDKTypesRequest {}
+
+// RuntimeService 只提供运行中应用所需的上下文、依赖发现和浏览器 SDK。
+service RuntimeService {
+  // GetRuntimeContext 返回当前应用和调用主体的可信上下文。
+  rpc GetRuntimeContext(GetRuntimeContextRequest) returns (RuntimeContext) {
+    option (google.api.http) = {get: "/api/runtime/v1/apps/{app_id}/context"};
+  }
+
+  // ListRuntimeDependencies 返回 source manifest 声明的全部直接依赖。
+  rpc ListRuntimeDependencies(ListRuntimeDependenciesRequest) returns (ListRuntimeDependenciesResponse) {
+    option (google.api.http) = {get: "/api/runtime/v1/apps/{app_id}/dependencies"};
+  }
+
+  // GetRuntimeDependency 通过 alias 或应用 ID 返回一个直接依赖。
+  rpc GetRuntimeDependency(GetRuntimeDependencyRequest) returns (RuntimeDependency) {
+    option (google.api.http) = {get: "/api/runtime/v1/apps/{app_id}/dependencies/{selector}"};
+  }
+
+  // GetRuntimeDependencyEndpoint 返回 Service 依赖的一个 Master 代理地址。
+  rpc GetRuntimeDependencyEndpoint(GetRuntimeDependencyEndpointRequest) returns (RuntimeDependencyEndpoint) {
+    option (google.api.http) = {get: "/api/runtime/v1/apps/{app_id}/dependencies/{selector}/endpoints/{endpoint_name}"};
+  }
+
+  // GetBrowserSDK 返回平台当前版本的浏览器运行时实现。
+  rpc GetBrowserSDK(GetBrowserSDKRequest) returns (google.api.HttpBody) {
+    option (google.api.http) = {get: "/api/runtime/v1/browser-sdk.js"};
+  }
+
+  // GetBrowserSDKTypes 返回与浏览器运行时实现同步的 TypeScript 声明。
+  rpc GetBrowserSDKTypes(GetBrowserSDKTypesRequest) returns (google.api.HttpBody) {
+    option (google.api.http) = {get: "/api/runtime/v1/browser-sdk.d.ts"};
+  }
+}

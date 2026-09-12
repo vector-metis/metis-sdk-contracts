@@ -1,0 +1,70 @@
+schema_version: 1
+id: coverage-app-a7x2m
+version: 1.0.0
+display_name: Contract Coverage
+type: web
+description: Exercises every documented MPK packaging surface.
+integration_docs_url: https://example.com/coverage/integrations
+screenshots:
+  - screenshots/home.png
+  - screenshots/detail.png
+  - screenshots/detail.jpg
+  - screenshots/mobile.webp
+arch: [amd64, arm64]
+dependencies:
+  - id: required-core-a7x2m
+    alias: core
+    required: true
+  - id: optional-map-a7x2m
+    alias: map
+    required: false
+settings:
+  site_name: {label: Site name, type: string, required: true}
+  log_level: {label: Log level, type: select, required: true, default: info, options: [debug, info, warn]}
+  max_upload_mb: {label: Upload limit, type: number, default: "32"}
+  enable_audit: {label: Enable audit, type: bool, default: "true"}
+  webhook_token: {label: Webhook token, type: secret}
+  optional_console_token: {label: Optional console token, type: secret}
+models:
+  llm.0: {interface: openai.chat.completions}
+  embedding.0: {interface: openai.embeddings}
+  rerank.0: {interface: openai.rerank}
+services:
+  web:
+    endpoints:
+      - {name: web, protocol: http, container_port: 8080}
+    mounts:
+      - {source: config, target: /etc/app}
+      - {source: data, target: /var/lib/app}
+    environment:
+      APP_ID: {value: "${METIS_APP_ID}"}
+      APP_NAME: {value: "${METIS_APP_NAME}"}
+      APP_VERSION: {value: "${METIS_APP_VERSION}"}
+      SITE_NAME: {setting: site_name}
+      LOG_LEVEL: {setting: log_level}
+      MAX_UPLOAD_MB: {setting: max_upload_mb}
+      ENABLE_AUDIT: {setting: enable_audit}
+      WEBHOOK_TOKEN: {setting: webhook_token}
+      OPTIONAL_CONSOLE_TOKEN: {setting: optional_console_token}
+      S3_ENDPOINT: {value: "${METIS_S3_ENDPOINT}"}
+      S3_BUCKET: {value: "${METIS_S3_BUCKET}"}
+      S3_SHARED_BUCKETS: {value: "${METIS_S3_SHARED_BUCKETS}"}
+      API_ENDPOINT: {value: "${METIS_PLATFORM_ENDPOINT}"}
+      API_TOKEN: {value: "${METIS_APP_TOKEN}"}
+      LLM_ENDPOINT: {value: "${METIS_LLM_0_ENDPOINT}"}
+      LLM_MODEL: {value: "${METIS_LLM_0_MODEL}"}
+      LLM_API_KEY: {value: "${METIS_LLM_0_API_KEY}"}
+      LLM_CONTEXT_WINDOW: {value: "${METIS_LLM_0_CONTEXT_WINDOW}"}
+      LLM_MAX_INPUT: {value: "${METIS_LLM_0_MAX_INPUT_TOKENS}"}
+      LLM_MAX_OUTPUT: {value: "${METIS_LLM_0_MAX_OUTPUT_TOKENS}"}
+    capabilities:
+      object-storage: {}
+      platform-api: {}
+      model-gateway: {slots: [llm.0]}
+  infer:
+    mounts:
+      - {source: log, target: /var/log/app}
+      - {source: tmp, target: /tmp/app}
+    capabilities:
+      model-gateway: {slots: [embedding.0, rerank.0]}
+      compose-override: {}

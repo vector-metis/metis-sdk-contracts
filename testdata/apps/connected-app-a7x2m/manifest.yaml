@@ -1,0 +1,11 @@
+schema_version: 1
+id: connected-app-a7x2m
+version: 1.0.0
+display_name: Connected Fixture
+type: web
+arch: [amd64]
+dependencies: [{id: core-a7x2m, alias: core, required: true}]
+services:
+  web:
+    endpoints:
+      - {name: web, protocol: http, container_port: 8080}

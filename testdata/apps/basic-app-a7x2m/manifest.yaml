@@ -1,0 +1,11 @@
+schema_version: 1
+id: basic-app-a7x2m
+version: 1.0.0
+display_name: Basic Fixture
+type: web
+arch: [amd64]
+dependencies: []
+services:
+  web:
+    endpoints:
+      - {name: web, protocol: http, container_port: 8080}

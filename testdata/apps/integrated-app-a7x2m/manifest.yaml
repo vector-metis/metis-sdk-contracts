@@ -1,0 +1,30 @@
+schema_version: 1
+id: integrated-app-a7x2m
+version: 1.0.0
+display_name: Integrated Fixture
+type: web
+arch: [amd64]
+dependencies: []
+settings:
+  wiki-name:
+    label: Wiki name
+    type: string
+    required: true
+    default: Metis
+models:
+  llm.0:
+    interface: openai.chat.completions
+services:
+  web:
+    endpoints:
+      - {name: web, protocol: http, container_port: 8080}
+    mounts:
+      - {source: config, target: /etc/app}
+    environment:
+      DATA_DIR: {value: /var/lib/app}
+      WIKI_NAME: {setting: wiki-name}
+    capabilities:
+      object-storage: {}
+      platform-api: {}
+      model-gateway: {slots: [llm.0]}
+      compose-override: {}
