@@ -114,6 +114,8 @@ type Dependency struct {
 	ID       string `yaml:"id" json:"id"`
 	Alias    string `yaml:"alias" json:"alias"`
 	Required bool   `yaml:"required" json:"required"`
+	// Version 是必填的有限 SemVer 约束，例如 ^1.2.0 或 >=1.2.0 <2.0.0。
+	Version string `yaml:"version" json:"version"`
 }
 
 // Manifest 是保存在 MPK 包根的完整声明式元数据。
@@ -251,7 +253,7 @@ func rejectUnknownManifestFields(value *yaml.Node) error {
 		switch pair.key {
 		case "dependencies":
 			for _, item := range sequenceItems(pair.value) {
-				if err := rejectMappingKeys(item, map[string]struct{}{"id": {}, "alias": {}, "required": {}}); err != nil {
+				if err := rejectMappingKeys(item, map[string]struct{}{"id": {}, "alias": {}, "required": {}, "version": {}}); err != nil {
 					return err
 				}
 			}
@@ -368,6 +370,9 @@ func (m *Manifest) validateIdentity() error {
 	if m.ID == "" || m.Version == "" || m.DisplayName == "" {
 		return fmt.Errorf("manifest: id, version and display_name are required")
 	}
+	if err := ValidateVersion(m.Version); err != nil {
+		return fmt.Errorf("manifest: %w", err)
+	}
 	if m.SchemaVersion != 1 {
 		return fmt.Errorf("manifest: schema_version must be 1")
 	}
@@ -413,8 +418,11 @@ func (m *Manifest) validateIdentity() error {
 	aliases := make(map[string]struct{}, len(m.Dependencies))
 	dependencyIDs := make(map[string]struct{}, len(m.Dependencies))
 	for index, dependency := range m.Dependencies {
-		if dependency.ID == "" || dependency.Alias == "" {
-			return fmt.Errorf("manifest: dependencies[%d] requires id and alias", index)
+		if dependency.ID == "" || dependency.Alias == "" || dependency.Version == "" {
+			return fmt.Errorf("manifest: dependencies[%d] requires id, alias and version", index)
+		}
+		if err := ValidateDependencyConstraint(dependency.Version); err != nil {
+			return fmt.Errorf("manifest: dependencies[%d] has invalid version constraint: %w", index, err)
 		}
 		if dependency.ID == m.ID {
 			return fmt.Errorf("manifest: dependency %q references itself", dependency.ID)

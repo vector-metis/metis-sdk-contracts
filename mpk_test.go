@@ -302,7 +302,7 @@ display_name: Demo
 type: web
 arch: [amd64]
 dependencies:
-  - {id: wiki-b3k9q, alias: wiki, required: true}
+  - {id: wiki-b3k9q, alias: wiki, required: true, version: "^1.0.0"}
 services:
   web:
     endpoints: [{name: web, protocol: http, container_port: 8080}]

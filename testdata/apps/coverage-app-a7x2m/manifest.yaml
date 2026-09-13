@@ -15,9 +15,11 @@ dependencies:
   - id: required-core-a7x2m
     alias: core
     required: true
+    version: "^1.0.0"
   - id: optional-map-a7x2m
     alias: map
     required: false
+    version: "~1.0.0"
 settings:
   site_name: {label: Site name, type: string, required: true}
   log_level: {label: Log level, type: select, required: true, default: info, options: [debug, info, warn]}

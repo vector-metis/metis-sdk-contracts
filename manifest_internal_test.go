@@ -23,16 +23,16 @@ func TestManifestRejectsAmbiguousDependencySelectors(t *testing.T) {
 		{
 			name: "duplicate app id",
 			dependencies: []Dependency{
-				{ID: "target-app-a7x2m", Alias: "first"},
-				{ID: "target-app-a7x2m", Alias: "second"},
+				{ID: "target-app-a7x2m", Alias: "first", Version: "1.0.0"},
+				{ID: "target-app-a7x2m", Alias: "second", Version: "1.0.0"},
 			},
 			want: "duplicate dependency id",
 		},
 		{
 			name: "alias conflicts with app id",
 			dependencies: []Dependency{
-				{ID: "target-app-a7x2m", Alias: "data"},
-				{ID: "data", Alias: "other"},
+				{ID: "target-app-a7x2m", Alias: "data", Version: "1.0.0"},
+				{ID: "data", Alias: "other", Version: "1.0.0"},
 			},
 			want: "conflicts with another dependency id",
 		},

@@ -4,7 +4,7 @@ version: 1.0.0
 display_name: Connected Fixture
 type: web
 arch: [amd64]
-dependencies: [{id: core-a7x2m, alias: core, required: true}]
+dependencies: [{id: core-a7x2m, alias: core, required: true, version: "^1.0.0"}]
 services:
   web:
     endpoints:
