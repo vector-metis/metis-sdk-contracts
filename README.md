@@ -4,6 +4,16 @@
 
 本仓库不包含 Metis 平台服务端、在线应用商店服务端或生产配置。根目录 Go module 提供 CLI 所需的 MPK/manifest 校验能力；`proto/`、`browser/` 和 `fixtures/` 保存跨语言公开契约。
 
+## Compose 运行约定
+
+应用的常驻 Compose service 必须声明：
+
+```yaml
+restart: unless-stopped
+```
+
+一次性任务 service 可以使用 `x-metis.oneshot: true`，并省略 `restart` 或声明 `restart: no`。一次性任务不应使用其它重启策略。
+
 ## 开发
 
 ```bash

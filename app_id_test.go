@@ -13,6 +13,7 @@ func TestValidateMPKRejectsComposeEnvironment(t *testing.T) {
 		files["compose.amd64.yaml"] = []byte(`services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
     environment:
       APP: ${METIS_APP_ID}
 `)

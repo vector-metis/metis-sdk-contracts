@@ -22,8 +22,8 @@ func TestInspectPackageImagesStreamsAndValidatesAllArchitectures(t *testing.T) {
 	metadata := contract.PackageMetadata{
 		Manifest: contract.Manifest{ID: "demo-a7x2m", Version: "1.0.0", Architectures: []string{contract.ArchAMD64, contract.ArchARM64}},
 		Compose: map[string]string{
-			contract.ArchAMD64: "services:\n  web:\n    image: demo-a7x2m/web:1.0.0\n",
-			contract.ArchARM64: "services:\n  web:\n    image: demo-a7x2m/web:1.0.0\n",
+			contract.ArchAMD64: "services:\n  web:\n    image: demo-a7x2m/web:1.0.0\n    restart: unless-stopped\n",
+			contract.ArchARM64: "services:\n  web:\n    image: demo-a7x2m/web:1.0.0\n    restart: unless-stopped\n",
 		},
 	}
 	visited := make([]string, 0, 2)
@@ -58,8 +58,8 @@ func TestInspectPackageImagesRejectsArchitectureReferenceDrift(t *testing.T) {
 	metadata := contract.PackageMetadata{
 		Manifest: contract.Manifest{ID: "demo-a7x2m", Version: "1.0.0", Architectures: []string{contract.ArchAMD64, contract.ArchARM64}},
 		Compose: map[string]string{
-			contract.ArchAMD64: "services:\n  web:\n    image: demo-a7x2m/web:1.0.0\n",
-			contract.ArchARM64: "services:\n  web:\n    image: demo-a7x2m/web:2.0.0\n",
+			contract.ArchAMD64: "services:\n  web:\n    image: demo-a7x2m/web:1.0.0\n    restart: unless-stopped\n",
+			contract.ArchARM64: "services:\n  web:\n    image: demo-a7x2m/web:2.0.0\n    restart: unless-stopped\n",
 		},
 	}
 	_, err := contract.InspectPackageImages(bytes.NewReader(packageData), metadata, func(archive contract.PackageImageArchive) (*contract.ImageArchiveSummary, error) {

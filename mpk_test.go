@@ -60,6 +60,7 @@ services:
 		"compose.amd64.yaml": []byte(`services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
 `),
 		"images/amd64/app.tar": dockerArchive(t, "demo-a7x2m/web:1.0.0"),
 		"icons/icon-64.png":    pngFixture(t, 64, 64),
@@ -114,6 +115,49 @@ func TestValidateMPKAcceptsValidPackage(t *testing.T) {
 	}
 }
 
+func TestValidateMPKRequiresRestartPolicyForLongRunningServices(t *testing.T) {
+	data := buildMPK(t, func(files map[string][]byte) {
+		files["compose.amd64.yaml"] = []byte(`services:
+  web:
+    image: demo-a7x2m/web:1.0.0
+`)
+	})
+	_, err := validate(t, data)
+	if err == nil || !strings.Contains(err.Error(), "must declare restart: unless-stopped") {
+		t.Fatalf("ValidateMPK() error = %v, want restart policy rejection", err)
+	}
+}
+
+func TestValidateMPKAllowsExplicitOneShotService(t *testing.T) {
+	data := buildMPK(t, func(files map[string][]byte) {
+		files["compose.amd64.yaml"] = []byte(`services:
+  web:
+    image: demo-a7x2m/web:1.0.0
+    x-metis:
+      oneshot: true
+`)
+	})
+	if _, err := validate(t, data); err != nil {
+		t.Fatalf("ValidateMPK() error = %v, want one-shot service to pass", err)
+	}
+}
+
+func TestValidateMPKRejectsRestartedOneShotService(t *testing.T) {
+	data := buildMPK(t, func(files map[string][]byte) {
+		files["compose.amd64.yaml"] = []byte(`services:
+  web:
+    image: demo-a7x2m/web:1.0.0
+    restart: always
+    x-metis:
+      oneshot: true
+`)
+	})
+	_, err := validate(t, data)
+	if err == nil || !strings.Contains(err.Error(), "oneshot and cannot declare restart") {
+		t.Fatalf("ValidateMPK() error = %v, want one-shot restart rejection", err)
+	}
+}
+
 // TestValidateMPKAcceptsServiceApplication 固化 Service 应用通过具名 endpoint 暴露原始协议，
 // 不需要也不得声明 Web 主入口。
 func TestValidateMPKAcceptsServiceApplication(t *testing.T) {
@@ -136,8 +180,10 @@ services:
 		files["compose.amd64.yaml"] = []byte(`services:
   database:
     image: demo-a7x2m/database:1.0.0
+    restart: unless-stopped
   daemon:
     image: demo-a7x2m/daemon:1.0.0
+    restart: unless-stopped
 `)
 		files["images/amd64/app.tar"] = dockerArchive(t, "demo-a7x2m/database:1.0.0")
 		files["images/amd64/daemon.tar"] = dockerArchive(t, "demo-a7x2m/daemon:1.0.0")
@@ -177,10 +223,12 @@ services:
 		files["compose.amd64.yaml"] = []byte(`services:
   database:
     image: demo-a7x2m/database:1.0.0
+    restart: unless-stopped
 `)
 		files["compose.arm64.yaml"] = []byte(`services:
   worker:
     image: demo-a7x2m/worker:1.0.0
+    restart: unless-stopped
 `)
 		files["images/amd64/app.tar"] = dockerArchive(t, "demo-a7x2m/database:1.0.0")
 		files["images/arm64/app.tar"] = dockerArchiveForArchitecture(t, "arm64", "demo-a7x2m/worker:1.0.0")
@@ -211,6 +259,7 @@ services:
 		files["compose.amd64.yaml"] = []byte(`services:
   daemon:
     image: demo-a7x2m/daemon:1.0.0
+    restart: unless-stopped
 `)
 		files["images/amd64/app.tar"] = dockerArchive(t, "demo-a7x2m/daemon:1.0.0")
 	})
@@ -238,6 +287,7 @@ func TestValidateMPKRejectsLegacyEntranceLabels(t *testing.T) {
 				files["compose.amd64.yaml"] = []byte(`services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
     labels: ` + test.labels + "\n")
 			})
 
@@ -254,6 +304,7 @@ func TestValidateMPKAllowsOrdinaryValuelessLabel(t *testing.T) {
 		files["compose.amd64.yaml"] = []byte(`services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
     labels: ["com.example.feature"]
 `)
 	})
@@ -269,6 +320,7 @@ func TestValidateMPKRejectsInterpolationOutsideServices(t *testing.T) {
 services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
 `)
 	})
 
@@ -284,6 +336,7 @@ func TestValidateMPKAllowsEscapedComposeDollar(t *testing.T) {
 services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
 `)
 	})
 
@@ -310,6 +363,7 @@ services:
 		files["compose.amd64.yaml"] = []byte(`services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
     environment:
       WIKI_TOKEN: ${METIS_APP_WIKI_SERVICE_TOKEN}
 `)
@@ -327,6 +381,7 @@ func TestValidateMPKRejectsHostNetworkMode(t *testing.T) {
 		files["compose.amd64.yaml"] = []byte(`services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
     network_mode: host
 `)
 	})
@@ -343,6 +398,7 @@ func TestValidateMPKRejectsExtraHosts(t *testing.T) {
 		files["compose.amd64.yaml"] = []byte(`services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
     extra_hosts: ["example.invalid:192.0.2.10"]
 `)
 	})
@@ -358,6 +414,7 @@ func TestValidateMPKRejectsInvalidApplicationShape(t *testing.T) {
 	serviceCompose := `services:
   daemon:
     image: demo-a7x2m/daemon:1.0.0
+    restart: unless-stopped
 `
 	tests := []struct {
 		name      string
@@ -512,6 +569,7 @@ services:
 			files["compose.amd64.yaml"] = []byte(`services:
   web:
     image: demo-a7x2m/web:latest
+    restart: unless-stopped
 `)
 			files["images/amd64/app.tar"] = dockerArchive(t, "demo-a7x2m/web:latest")
 		}},
@@ -519,6 +577,7 @@ services:
 			files["compose.amd64.yaml"] = []byte(`services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
     ports: ["127.0.0.1:28080:8080"]
 `)
 		}},

@@ -91,7 +91,7 @@ func TestBuildContractMPKIsDeterministicAndRejectsImages(t *testing.T) {
 	sourceWithImage := t.TempDir()
 	files := map[string]string{
 		"manifest.yaml":        "schema_version: 1\nid: image-app\nversion: 1.0.0\ndisplay_name: Image App\ntype: web\narch: [amd64]\ndependencies: []\nservices:\n  web:\n    endpoints: [{name: web, protocol: http, container_port: 8080}]\n",
-		"compose.amd64.yaml":   "services:\n  web:\n    image: image-app/web:1.0.0\n",
+		"compose.amd64.yaml":   "services:\n  web:\n    image: image-app/web:1.0.0\n    restart: unless-stopped\n",
 		"images/amd64/web.tar": "not an image archive",
 	}
 	for name, data := range files {

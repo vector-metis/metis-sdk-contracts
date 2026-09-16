@@ -92,6 +92,19 @@ func validateComposeServices(
 			return fmt.Errorf("mpk: %s service %q image %q needs a non-reserved tag", composeName, serviceName, image)
 		}
 		composeImages[image] = struct{}{}
+		oneshoot, err := validateComposeRole(composeName, serviceName, service)
+		if err != nil {
+			return err
+		}
+		restart, _ := service["restart"].(string)
+		restart = strings.TrimSpace(restart)
+		if oneshoot {
+			if restart != "" && restart != "no" {
+				return fmt.Errorf("mpk: %s service %q is oneshot and cannot declare restart: %s", composeName, serviceName, restart)
+			}
+		} else if restart != "unless-stopped" {
+			return fmt.Errorf("mpk: %s service %q must declare restart: unless-stopped", composeName, serviceName)
+		}
 		for _, forbidden := range []string{"ports", "environment", "env_file", "volumes", "volumes_from", "tmpfs", "configs", "secrets"} {
 			if _, exists := service[forbidden]; exists {
 				return fmt.Errorf("mpk: %s service %q cannot declare %s; use manifest.yaml", composeName, serviceName, forbidden)
@@ -154,6 +167,33 @@ func validateComposeServices(
 		}
 	}
 	return nil
+}
+
+// validateComposeRole identifies one-shot services whose successful exit is the
+// completion signal rather than a long-running container.
+func validateComposeRole(composeName, serviceName string, service map[string]any) (bool, error) {
+	extension, exists := service["x-metis"]
+	if !exists || extension == nil {
+		return false, nil
+	}
+	values, ok := extension.(map[string]any)
+	if !ok {
+		return false, fmt.Errorf("mpk: %s service %q x-metis must be a mapping", composeName, serviceName)
+	}
+	for key := range values {
+		if key != "required" && key != "oneshot" {
+			return false, fmt.Errorf("mpk: %s service %q x-metis contains unknown field %q", composeName, serviceName, key)
+		}
+	}
+	for _, key := range []string{"required", "oneshot"} {
+		if value, present := values[key]; present {
+			if _, ok := value.(bool); !ok {
+				return false, fmt.Errorf("mpk: %s service %q x-metis.%s must be boolean", composeName, serviceName, key)
+			}
+		}
+	}
+	oneshoot, _ := values["oneshot"].(bool)
+	return oneshoot, nil
 }
 
 func stringMapKeys(value any) map[string]struct{} {

@@ -153,6 +153,7 @@ services:
 		files["compose.amd64.yaml"] = []byte(`services:
   web:
     image: qa-market-1-wpsjl/web:1.0.0
+    restart: unless-stopped
 `)
 	})
 
@@ -178,6 +179,7 @@ services:
 		files["compose.arm64.yaml"] = []byte(`services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
 `)
 		files["images/amd64/app.tar"] = dockerOCIArchive(t, "demo-a7x2m/web:1.0.0", "demo-a7x2m/web:1.0.0", contract.ArchAMD64, contract.ArchAMD64)
 		files["images/arm64/app.tar"] = dockerOCIArchive(t, "demo-a7x2m/web:1.0.0", "demo-a7x2m/web:1.0.0", contract.ArchARM64, contract.ArchARM64)

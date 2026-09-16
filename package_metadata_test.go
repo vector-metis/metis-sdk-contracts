@@ -43,6 +43,7 @@ func TestInspectPackageMetadataReturnsOnlyBoundedContractFiles(t *testing.T) {
 	compose := `services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
 `
 	packageData := metadataPackage(t, map[string]string{
 		"manifest.yaml": `schema_version: 1

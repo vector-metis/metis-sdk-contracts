@@ -68,6 +68,8 @@ func gateError(err error) error {
 		rule = "MPK-COMPOSE-INTERPOLATION"
 	case strings.Contains(message, "platform label"):
 		rule = "MPK-COMPOSE-PLATFORM-LABEL"
+	case strings.Contains(message, "must declare restart") || strings.Contains(message, "oneshot and cannot declare restart"):
+		rule = "MPK-COMPOSE-RESTART"
 	case strings.Contains(message, "service sets differ") || strings.Contains(message, "undeclared service") || strings.Contains(message, "missing declared service"):
 		rule = "MPK-MANIFEST-SERVICE-MISMATCH"
 	case strings.Contains(message, "overlay"):

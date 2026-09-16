@@ -23,7 +23,7 @@ func TestWriteDeploymentPackageContainsOnlyRuntimeFiles(t *testing.T) {
 	})
 	var output bytes.Buffer
 	err := contract.WriteDeploymentPackage(&output, contract.DeploymentPackage{
-		Compose:      []byte("services:\n  web:\n    image: platform.example.invalid/demo/web:1.0.0\n"),
+		Compose:      []byte("services:\n  web:\n    image: platform.example.invalid/demo/web:1.0.0\n    restart: unless-stopped\n"),
 		Environment:  map[string]string{"METIS_APP_ID": "demo", "EMPTY": ""},
 		Overlay:      map[string][]byte{"etc/app.conf": []byte("enabled=true\n")},
 		Package:      bytes.NewReader(packageData),

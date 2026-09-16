@@ -1,5 +1,7 @@
 services:
   web:
     image: coverage-app-a7x2m/web:1.0.0
+    restart: unless-stopped
   infer:
     image: coverage-app-a7x2m/infer:1.0.0
+    restart: unless-stopped

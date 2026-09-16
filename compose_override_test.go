@@ -235,6 +235,7 @@ func preparedOverrideMetadata() contract.PackageMetadata {
 		Compose: map[string]string{contract.ArchAMD64: `services:
   web:
     image: override-app-a7x2m/web:1.0.0
+    restart: unless-stopped
     deploy:
       resources:
         limits:

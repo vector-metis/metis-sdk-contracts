@@ -23,7 +23,7 @@ func TestGateMPKUsesOneResultShapeAcrossConsumers(t *testing.T) {
 	}
 
 	invalid := buildMPK(t, func(files map[string][]byte) {
-		files["compose.amd64.yaml"] = []byte("services:\n  web:\n    image: demo-a7x2m/web:1.0.0\n    ports: [\"8080:8080\"]\n")
+		files["compose.amd64.yaml"] = []byte("services:\n  web:\n    image: demo-a7x2m/web:1.0.0\n    restart: unless-stopped\n    ports: [\"8080:8080\"]\n")
 	})
 	_, err = contract.GateMPK(bytes.NewReader(invalid), contract.GateOptions{})
 	if err == nil {

@@ -68,6 +68,7 @@ func TestPlanInstallPreservesAllowedComposeFields(t *testing.T) {
 services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
     networks: [backend]
 networks:
   backend:
@@ -118,8 +119,10 @@ services:
 		files["compose.amd64.yaml"] = []byte(`services:
   daemon:
     image: identity-service-a7x2m/daemon:1.0.0
+    restart: unless-stopped
   helper:
     image: identity-service-a7x2m/helper:1.0.0
+    restart: unless-stopped
 `)
 		delete(files, "images/amd64/app.tar")
 		files["images/amd64/daemon.tar"] = dockerArchive(t, "identity-service-a7x2m/daemon:1.0.0")
@@ -180,6 +183,7 @@ services:
 		files["compose.amd64.yaml"] = []byte(`services:
   daemon:
     image: demo-a7x2m/daemon:1.0.0
+    restart: unless-stopped
 `)
 		files["images/amd64/app.tar"] = dockerArchive(t, "demo-a7x2m/daemon:1.0.0")
 	})
@@ -241,8 +245,10 @@ services:
 		files["compose.amd64.yaml"] = []byte(`services:
   web:
     image: scoped-app-a7x2m/web:1.0.0
+    restart: unless-stopped
   worker:
     image: scoped-app-a7x2m/worker:1.0.0
+    restart: unless-stopped
 `)
 		delete(files, "images/amd64/app.tar")
 		files["images/amd64/web.tar"] = dockerArchive(t, "scoped-app-a7x2m/web:1.0.0")
@@ -282,8 +288,10 @@ func TestPlanPreparedInstallRewritesEveryImageReference(t *testing.T) {
 		Compose: map[string]string{contract.ArchAMD64: `services:
   web:
     image: prepared-app-a7x2m/web:1.0.0
+    restart: unless-stopped
   worker:
     image: prepared-app-a7x2m/worker:1.0.0
+    restart: unless-stopped
 `},
 	}
 	plan, err := contract.PlanPreparedInstall(metadata, contract.InstallOptions{
@@ -328,6 +336,7 @@ func TestPlanPreparedInstallRejectsIncompleteImageMapping(t *testing.T) {
 		Compose: map[string]string{contract.ArchAMD64: `services:
   web:
     image: prepared-app-a7x2m/web:1.0.0
+    restart: unless-stopped
 `},
 	}
 	_, err := contract.PlanPreparedInstall(metadata, contract.InstallOptions{
@@ -371,6 +380,7 @@ services:
 		files["compose.amd64.yaml"] = []byte(`services:
   web:
     image: demo-a7x2m/web:1.0.0
+    restart: unless-stopped
 `)
 	})
 	_, err := contract.PlanInstall(bytes.NewReader(data), contract.InstallOptions{

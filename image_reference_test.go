@@ -117,8 +117,10 @@ services:
 		files["compose.amd64.yaml"] = []byte(`services:
   web:
     image: first.example/team/web:1.0.0
+    restart: unless-stopped
   worker:
     image: second.example/other/web:1.0.0
+    restart: unless-stopped
 `)
 		files["images/amd64/app.tar"] = dockerArchive(t, "first.example/team/web:1.0.0")
 		files["images/amd64/worker.tar"] = dockerArchive(t, "second.example/other/web:1.0.0")
