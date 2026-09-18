@@ -88,6 +88,40 @@ func TestWriteDeploymentPackageRejectsUnsafeOverlayPath(t *testing.T) {
 	}
 }
 
+func TestWriteDeploymentPackagePreservesOverlayDirectoryMount(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	err := contract.WriteDeploymentPackage(&output, contract.DeploymentPackage{
+		Compose: []byte("services: {}\n"), Environment: map[string]string{},
+		Overlay: map[string][]byte{"static/": nil},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gzipReader, err := gzip.NewReader(bytes.NewReader(output.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gzipReader.Close()
+	tarReader := tar.NewReader(gzipReader)
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header.Name == "overlay/static/" {
+			if header.Typeflag != tar.TypeDir {
+				t.Fatalf("overlay/static type = %d, want directory", header.Typeflag)
+			}
+			return
+		}
+	}
+	t.Fatal("deployment package did not preserve overlay/static directory")
+}
+
 type deploymentMPKEntry struct {
 	name    string
 	mode    int64

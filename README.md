@@ -17,7 +17,7 @@ restart: unless-stopped
 当前 MPK v1 的路径契约要求：沙箱 source 在生成的 Compose 中使用应用 scope 下的相对目录
 （`./program`、`./config`、`./data`、`./log`、`./tmp`），overlay 必须保留在 `overlay/` 层并使用
 `./overlay` 或 `./overlay/...` 显式声明只读挂载。平台不再生成或注入 `METIS_DIR_*`；旧的 overlay
-source 写法不会被自动改写。
+source 写法不会被自动改写，manifest 中的 `${METIS_DIR_*}` 占位符也会被门禁拒绝。
 
 ## 开发
 

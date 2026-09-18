@@ -136,3 +136,15 @@ func TestGateMPKAcceptsOverlayRootMount(t *testing.T) {
 		t.Fatalf("GateMPK() error = %v, want overlay root mount accepted", err)
 	}
 }
+
+// TestGateMPKRejectsRemovedDirectoryPlaceholders 防止旧宿主目录变量从公开 contracts 回流到容器。
+func TestGateMPKRejectsRemovedDirectoryPlaceholders(t *testing.T) {
+	t.Parallel()
+	data := buildMPK(t, func(files map[string][]byte) {
+		files["manifest.yaml"] = append(files["manifest.yaml"], []byte("    environment:\n      APP_CONFIG: {value: \"${METIS_DIR_CONFIG}/app.yaml\"}\n")...)
+	})
+	_, err := contract.GateMPK(bytes.NewReader(data), contract.GateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "removed directory placeholder") {
+		t.Fatalf("GateMPK() error = %v, want removed directory placeholder rejection", err)
+	}
+}

@@ -96,17 +96,27 @@ func buildSourceMPK(sourceDir string, output io.Writer, contractOnly bool) error
 		return fmt.Errorf("mpk: source %q is not a directory", sourceDir)
 	}
 
-	type sourceFile struct {
+	type sourceEntry struct {
 		name string
 		path string
 		size int64
+		dir  bool
 	}
-	var files []sourceFile
+	var entries []sourceEntry
 	err = filepath.WalkDir(sourceDir, func(itemPath string, item fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if item.IsDir() {
+			// 空的 overlay 目录也是有意义的挂载源，必须保留目录条目。
+			relative, err := filepath.Rel(sourceDir, itemPath)
+			if err != nil {
+				return err
+			}
+			name := filepath.ToSlash(relative)
+			if name == "overlay" || strings.HasPrefix(name, "overlay/") {
+				entries = append(entries, sourceEntry{name: strings.TrimSuffix(name, "/") + "/", path: itemPath, dir: true})
+			}
 			return nil
 		}
 		if !item.Type().IsRegular() {
@@ -127,19 +137,19 @@ func buildSourceMPK(sourceDir string, output io.Writer, contractOnly bool) error
 		if err != nil {
 			return err
 		}
-		files = append(files, sourceFile{name: name, path: itemPath, size: info.Size()})
+		entries = append(entries, sourceEntry{name: name, path: itemPath, size: info.Size()})
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("mpk: read source: %w", err)
 	}
-	sort.Slice(files, func(left, right int) bool {
-		return files[left].name < files[right].name
+	sort.Slice(entries, func(left, right int) bool {
+		return entries[left].name < entries[right].name
 	})
 
 	gzipWriter := gzip.NewWriter(output)
 	tarWriter := tar.NewWriter(gzipWriter)
-	appendFile := func(item sourceFile) error {
+	appendFile := func(item sourceEntry) error {
 		if err := tarWriter.WriteHeader(&tar.Header{Name: item.name, Size: item.size, Mode: 0o644}); err != nil {
 			return err
 		}
@@ -151,14 +161,20 @@ func buildSourceMPK(sourceDir string, output io.Writer, contractOnly bool) error
 		closeErr := file.Close()
 		return errors.Join(copyErr, closeErr)
 	}
-	if manifestIndex := slices.IndexFunc(files, func(item sourceFile) bool { return item.name == ManifestName }); manifestIndex >= 0 {
-		manifest := files[manifestIndex]
-		files = slices.Delete(files, manifestIndex, manifestIndex+1)
+	if manifestIndex := slices.IndexFunc(entries, func(item sourceEntry) bool { return item.name == ManifestName }); manifestIndex >= 0 {
+		manifest := entries[manifestIndex]
+		entries = slices.Delete(entries, manifestIndex, manifestIndex+1)
 		if err := appendFile(manifest); err != nil {
 			return err
 		}
 	}
-	for _, item := range files {
+	for _, item := range entries {
+		if item.dir {
+			if err := tarWriter.WriteHeader(&tar.Header{Name: item.name, Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := appendFile(item); err != nil {
 			return err
 		}
@@ -228,18 +244,34 @@ func readMPKMember(reader io.ReadSeeker, name string, maxSize int64, notFound er
 	}
 }
 
-// ReadMPKOverlay 提取包内 overlay 下的全部普通文件；升级用它做整树确定性比较。
+// OverlayTree 是包内 overlay 的逻辑目录树，目录和文件分开保存，因而空目录
+// 也能作为合法的目录挂载源传递到 Agent。
+type OverlayTree struct {
+	Files       map[string][]byte
+	Directories map[string]struct{}
+}
+
+// ReadMPKOverlay 提取包内 overlay 下的全部普通文件；目录信息请使用 ReadMPKOverlayTree。
 func ReadMPKOverlay(reader io.ReadSeeker) (map[string][]byte, error) {
+	tree, err := ReadMPKOverlayTree(reader)
+	if err != nil {
+		return nil, err
+	}
+	return tree.Files, nil
+}
+
+// ReadMPKOverlayTree 提取包内 overlay 的文件和目录（包括空目录）。
+func ReadMPKOverlayTree(reader io.ReadSeeker) (OverlayTree, error) {
 	if _, err := reader.Seek(0, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("mpk: rewind package: %w", err)
+		return OverlayTree{}, fmt.Errorf("mpk: rewind package: %w", err)
 	}
 	defer func() { _, _ = reader.Seek(0, io.SeekStart) }()
 	gzipReader, err := gzip.NewReader(reader)
 	if err != nil {
-		return nil, fmt.Errorf("mpk: gzip format is invalid: %w", err)
+		return OverlayTree{}, fmt.Errorf("mpk: gzip format is invalid: %w", err)
 	}
 	defer gzipReader.Close()
-	files := make(map[string][]byte)
+	tree := OverlayTree{Files: make(map[string][]byte), Directories: make(map[string]struct{})}
 	found := false
 	tarReader := tar.NewReader(gzipReader)
 	for {
@@ -248,11 +280,14 @@ func ReadMPKOverlay(reader io.ReadSeeker) (map[string][]byte, error) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("mpk: tar format is invalid: %w", err)
+			return OverlayTree{}, fmt.Errorf("mpk: tar format is invalid: %w", err)
 		}
 		cleaned := path.Clean(header.Name)
 		if path.IsAbs(header.Name) || strings.HasPrefix(cleaned, "../") || cleaned == ".." {
-			return nil, fmt.Errorf("mpk: unsafe overlay path %q", header.Name)
+			return OverlayTree{}, fmt.Errorf("mpk: unsafe overlay path %q", header.Name)
+		}
+		if cleaned != "overlay" && !strings.HasPrefix(cleaned, "overlay/") {
+			continue
 		}
 		cleaned = strings.TrimPrefix(cleaned, "overlay/")
 		if cleaned == "" || cleaned == "." {
@@ -262,19 +297,25 @@ func ReadMPKOverlay(reader io.ReadSeeker) (map[string][]byte, error) {
 			continue
 		}
 		found = true
-		if header.Typeflag != tar.TypeReg {
+		switch header.Typeflag {
+		case tar.TypeDir:
+			tree.Directories[cleaned] = struct{}{}
 			continue
+		case tar.TypeReg:
+			// continue below
+		default:
+			return OverlayTree{}, fmt.Errorf("mpk: forbidden non-regular node %q", cleaned)
 		}
 		content, err := io.ReadAll(tarReader)
 		if err != nil {
-			return nil, fmt.Errorf("mpk: read overlay file %q: %w", cleaned, err)
+			return OverlayTree{}, fmt.Errorf("mpk: read overlay file %q: %w", cleaned, err)
 		}
-		files[cleaned] = content
+		tree.Files[cleaned] = content
 	}
 	if !found {
-		return nil, ErrOverlayNotFound
+		return OverlayTree{}, ErrOverlayNotFound
 	}
-	return files, nil
+	return tree, nil
 }
 
 // ValidateScreenshotPath 应用与上传一致的市场规则：包内相对路径必须位于 screenshots/ 且类型安全。

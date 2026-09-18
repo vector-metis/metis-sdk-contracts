@@ -46,18 +46,52 @@ func WriteDeploymentPackage(output io.Writer, deployment DeploymentPackage) (res
 		return err
 	}
 
-	names := make([]string, 0, len(deployment.Overlay))
+	directories := make(map[string]struct{})
+	files := make(map[string][]byte, len(deployment.Overlay))
 	for name := range deployment.Overlay {
+		isDirectory := strings.HasSuffix(name, "/")
 		cleaned := path.Clean(name)
 		if name == "" || path.IsAbs(name) || cleaned == "." || cleaned == ".." ||
 			strings.HasPrefix(cleaned, "../") || strings.ContainsRune(name, '\x00') {
 			return fmt.Errorf("deployment: unsafe overlay path %q", name)
 		}
-		names = append(names, cleaned)
+		if isDirectory {
+			directories[cleaned] = struct{}{}
+			continue
+		}
+		if _, duplicate := files[cleaned]; duplicate {
+			return fmt.Errorf("deployment: duplicate overlay path %q", cleaned)
+		}
+		files[cleaned] = deployment.Overlay[name]
+		for parent := path.Dir(cleaned); parent != "." && parent != ""; parent = path.Dir(parent) {
+			directories[parent] = struct{}{}
+		}
+	}
+	directoryNames := make([]string, 0, len(directories))
+	for name := range directories {
+		if _, exists := files[name]; exists {
+			return fmt.Errorf("deployment: overlay path is both file and directory %q", name)
+		}
+		for parent := path.Dir(name); parent != "." && parent != ""; parent = path.Dir(parent) {
+			if _, exists := files[parent]; exists {
+				return fmt.Errorf("deployment: overlay file blocks directory %q", name)
+			}
+		}
+		directoryNames = append(directoryNames, name)
+	}
+	sort.Strings(directoryNames)
+	for _, name := range directoryNames {
+		if err := tarWriter.WriteHeader(&tar.Header{Name: "overlay/" + name + "/", Typeflag: tar.TypeDir, Mode: 0o750}); err != nil {
+			return err
+		}
+	}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		if err := writeDeploymentFile(tarWriter, "overlay/"+name, 0o640, deployment.Overlay[name]); err != nil {
+		if err := writeDeploymentFile(tarWriter, "overlay/"+name, 0o640, files[name]); err != nil {
 			return err
 		}
 	}

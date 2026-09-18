@@ -636,6 +636,8 @@ func modelsForService(service ManifestService) map[string]struct{} {
 
 func validateServicePlaceholder(serviceName string, service ManifestService, name string, slots map[string]struct{}) error {
 	switch {
+	case strings.HasPrefix(name, "METIS_DIR_"):
+		return fmt.Errorf("manifest: service %q uses removed directory placeholder %q", serviceName, name)
 	case strings.HasPrefix(name, "METIS_S3_"):
 		if _, exists := service.Capabilities["object-storage"]; !exists {
 			return fmt.Errorf("manifest: service %q uses %s without object-storage capability", serviceName, name)
