@@ -580,9 +580,8 @@ func validateServiceEnvironment(services map[string]ManifestService, settings []
 			switch mount.Source {
 			case "program", "config", "data", "log", "tmp":
 			default:
-				clean := path.Clean(mount.Source)
-				if !strings.HasPrefix(mount.Source, "./") || clean == "." || strings.HasPrefix(clean, "../") || clean == ".." || !mount.ReadOnly {
-					return fmt.Errorf("manifest: service %q has invalid mount source %q", serviceName, mount.Source)
+				if !isOverlayMountSource(mount.Source) || !mount.ReadOnly {
+					return withGateRule("MPK-MANIFEST-MOUNT", fmt.Errorf("manifest: service %q has invalid mount source %q", serviceName, mount.Source))
 				}
 			}
 		}
@@ -593,6 +592,20 @@ func validateServiceEnvironment(services map[string]ManifestService, settings []
 		}
 	}
 	return nil
+}
+
+// isOverlayMountSource 只接受应用 scope 中 overlay 目录的规范化相对路径。
+// source 必须保留 ./overlay 前缀，并且必须是规范化路径，避免 ./overlay/../... 绕过根目录限制；
+// 包内成员是否存在由 MPK 元数据门禁继续校验。
+func isOverlayMountSource(source string) bool {
+	if !strings.HasPrefix(source, "./") {
+		return false
+	}
+	relative := strings.TrimPrefix(source, "./")
+	if relative != "overlay" && !strings.HasPrefix(relative, "overlay/") {
+		return false
+	}
+	return path.Clean(source) == relative
 }
 
 func isReservedMountTarget(target string) bool {

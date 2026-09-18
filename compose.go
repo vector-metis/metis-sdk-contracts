@@ -134,7 +134,7 @@ func validateComposeServices(
 			if !strings.HasPrefix(mount.Source, "./") {
 				continue
 			}
-			prefix := "overlay/" + strings.TrimPrefix(path.Clean(mount.Source), "./")
+			prefix := path.Clean(mount.Source)
 			found := false
 			for name := range files {
 				if name == prefix || strings.HasPrefix(name, prefix+"/") {
@@ -142,8 +142,17 @@ func validateComposeServices(
 					break
 				}
 			}
+			if !found && prefix == "overlay" {
+				// overlay/ 本身可能只有目录条目；只要包中存在其子项，整棵目录即可作为挂载源。
+				for name := range files {
+					if name == "overlay" || strings.HasPrefix(name, "overlay/") {
+						found = true
+						break
+					}
+				}
+			}
 			if !found {
-				return fmt.Errorf("mpk: %s service %q overlay mount %q is missing from overlay/", composeName, serviceName, mount.Source)
+				return withGateRule("MPK-MANIFEST-OVERLAY", fmt.Errorf("mpk: %s service %q overlay mount %q is missing from overlay/", composeName, serviceName, mount.Source))
 			}
 		}
 	}

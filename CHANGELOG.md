@@ -8,6 +8,9 @@
 
 - 要求常驻 Compose service 声明 `restart: unless-stopped`，并允许显式标记一次性 service。
 - 增加 `MPK-COMPOSE-RESTART` 门禁规则。
+- 收紧 overlay source 契约：只接受规范化的 `./overlay` 或 `./overlay/...`，并支持文件、子目录和整棵 overlay 目录挂载。
+- 安装计划改为在应用 scope 下生成相对沙箱 source，移除 `METIS_DIR_*` 环境变量和宿主机绝对路径。
+- 公开门禁规则与平台同步，补充路径越界、非规范化 source 和 overlay 根目录回归测试。
 
 ## 0.1.0
 

@@ -9,7 +9,7 @@ import (
 )
 
 // TestPlanInstallRendersRepresentativePackage 固化平台侧安装计划：
-// 契约负责包校验、配置校验、Compose 展平和资源默认值，平台不重复实现规则。
+// 契约负责包校验、配置校验、Compose 渲染和资源默认值，平台不重复实现规则。
 func TestPlanInstallRendersRepresentativePackage(t *testing.T) {
 	data := buildContractFixture(t, "integrated-app-a7x2m")
 	plan, err := contract.PlanInstall(bytes.NewReader(data), contract.InstallOptions{
@@ -43,7 +43,6 @@ func TestPlanInstallRendersRepresentativePackage(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"METIS_DIR_CONFIG: /var/lib/metis/apps/integrated/config",
 		"METIS_ENTRY_PORT: \"19081\"",
 		"METIS_S3_ENDPOINT: http://127.0.0.1:9002",
 		"METIS_PLATFORM_ENDPOINT: http://127.0.0.1",
@@ -54,9 +53,11 @@ func TestPlanInstallRendersRepresentativePackage(t *testing.T) {
 			t.Fatalf("install plan does not inject %q\n%s", want, rendered)
 		}
 	}
-	if plan.Environment["METIS_ENTRY_PORT"] != "19081" || plan.Environment["METIS_SETTING_WIKI_NAME"] != "Real Wiki" ||
-		plan.Environment["METIS_DIR_DATA"] != "/var/lib/metis/apps/integrated/data" {
+	if plan.Environment["METIS_ENTRY_PORT"] != "19081" || plan.Environment["METIS_SETTING_WIKI_NAME"] != "Real Wiki" {
 		t.Fatalf("install environment = %#v", plan.Environment)
+	}
+	if strings.Contains(rendered, "METIS_DIR_") || strings.Contains(rendered, "/var/lib/metis/") {
+		t.Fatalf("install plan contains removed directory variable or host path:\n%s", rendered)
 	}
 }
 

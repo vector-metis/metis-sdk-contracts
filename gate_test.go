@@ -94,3 +94,45 @@ func TestGateMPKContractOnlySkipsImageBody(t *testing.T) {
 		t.Fatalf("contract-only result = %+v", result)
 	}
 }
+
+// TestGateMPKEnforcesCanonicalOverlaySources 固化公开 contracts 与平台相同的 overlay 路径规则。
+func TestGateMPKEnforcesCanonicalOverlaySources(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "legacy source", source: "./config.yaml", want: "MPK-MANIFEST-MOUNT"},
+		{name: "parent escape", source: "./overlay/../config.yaml", want: "MPK-MANIFEST-MOUNT"},
+		{name: "double slash", source: "./overlay//config.yaml", want: "MPK-MANIFEST-MOUNT"},
+		{name: "current segment", source: "./overlay/./config.yaml", want: "MPK-MANIFEST-MOUNT"},
+		{name: "missing file", source: "./overlay/missing.conf", want: "MPK-MANIFEST-OVERLAY"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := contract.GateMPK(bytes.NewReader(buildMPK(t, func(files map[string][]byte) {
+				files["manifest.yaml"] = append(files["manifest.yaml"], []byte("    mounts:\n      - {source: "+test.source+", target: /etc/app.conf, read_only: true}\n")...)
+			})), contract.GateOptions{})
+			if err == nil {
+				t.Fatal("GateMPK() = nil, want overlay source rejection")
+			}
+			findings := contract.FindingsFromError(err)
+			if len(findings) != 1 || findings[0].RuleID != test.want {
+				t.Fatalf("FindingsFromError() = %+v, want %s", findings, test.want)
+			}
+		})
+	}
+}
+
+// TestGateMPKAcceptsOverlayRootMount 固化整棵 overlay 目录和其中的文件可以作为挂载源。
+func TestGateMPKAcceptsOverlayRootMount(t *testing.T) {
+	t.Parallel()
+	data := buildMPK(t, func(files map[string][]byte) {
+		files["manifest.yaml"] = append(files["manifest.yaml"], []byte("    mounts:\n      - {source: ./overlay, target: /etc/app, read_only: true}\n")...)
+		files["overlay/app.conf"] = []byte("enabled=true\n")
+	})
+	if _, err := contract.GateMPK(bytes.NewReader(data), contract.GateOptions{}); err != nil {
+		t.Fatalf("GateMPK() error = %v, want overlay root mount accepted", err)
+	}
+}

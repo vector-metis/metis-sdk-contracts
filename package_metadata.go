@@ -190,6 +190,10 @@ func scanPackageMetadataTar(reader io.Reader, maxPackageSize int64) (map[string]
 		present[name] = struct{}{}
 		switch header.Typeflag {
 		case tar.TypeDir:
+			// 保留 overlay 的目录条目，才能验证空目录或整棵 overlay 根目录挂载。
+			if name == "overlay" || strings.HasPrefix(name, "overlay/") {
+				files[name] = nil
+			}
 			continue
 		case tar.TypeReg:
 			if header.Size < 0 || header.Size > maxPackageSize || expanded > expandedLimit-header.Size {
@@ -202,6 +206,10 @@ func scanPackageMetadataTar(reader io.Reader, maxPackageSize int64) (map[string]
 			return nil, nil, 0, fmt.Errorf("mpk: unsupported tar node %q", name)
 		}
 		fileCount++
+		// 记录 overlay 成员名称但不读取正文，供 manifest 挂载存在性校验使用。
+		if name == "overlay" || strings.HasPrefix(name, "overlay/") {
+			files[name] = nil
+		}
 		limit := metadataFileLimit(name)
 		if limit == 0 {
 			if _, err := io.Copy(io.Discard, tarReader); err != nil {

@@ -32,6 +32,22 @@ type GateError struct {
 	Err     error
 }
 
+// gateRuleError 在校验 seam 处携带明确规则，避免公开 CLI 和平台因错误文案变化而得到不同 RuleID。
+type gateRuleError struct {
+	rule string
+	err  error
+}
+
+func (e *gateRuleError) Error() string { return e.err.Error() }
+func (e *gateRuleError) Unwrap() error { return e.err }
+
+func withGateRule(rule string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &gateRuleError{rule: rule, err: err}
+}
+
 func (e *GateError) Error() string { return e.Finding.Error() }
 func (e *GateError) Unwrap() error { return e.Err }
 
@@ -45,43 +61,48 @@ func gateError(err error) error {
 	}
 	message := err.Error()
 	rule := "MPK-MANIFEST"
-	switch {
-	case strings.Contains(message, "package size") || strings.Contains(message, "expanded package size"):
-		rule = "MPK-SIZE"
-	case strings.Contains(message, "settings.yaml"):
-		rule = "MPK-MANIFEST-LEGACY-SETTINGS"
-	case strings.Contains(message, "dependency application"):
-		rule = "MPK-MANIFEST-DEPENDENCY"
-	case strings.Contains(message, "required asset") || strings.Contains(message, "screenshot") || strings.Contains(message, "icon"):
-		rule = "MPK-ASSET"
-	case strings.Contains(message, "cannot declare ports"):
-		rule = "MPK-COMPOSE-PORTS"
-	case strings.Contains(message, "host network"):
-		rule = "MPK-COMPOSE-HOST-NETWORK"
-	case strings.Contains(message, "cannot declare volumes") || strings.Contains(message, "volumes_from") || strings.Contains(message, "tmpfs"):
-		rule = "MPK-COMPOSE-VOLUMES"
-	case strings.Contains(message, "cannot declare environment") || strings.Contains(message, "env_file"):
-		rule = "MPK-COMPOSE-ENVIRONMENT"
-	case strings.Contains(message, "cannot declare extra_hosts"):
-		rule = "MPK-COMPOSE-EXTRA-HOSTS"
-	case strings.Contains(message, "interpolation") || strings.Contains(message, "variable substitution"):
-		rule = "MPK-COMPOSE-INTERPOLATION"
-	case strings.Contains(message, "platform label"):
-		rule = "MPK-COMPOSE-PLATFORM-LABEL"
-	case strings.Contains(message, "must declare restart") || strings.Contains(message, "oneshot and cannot declare restart"):
-		rule = "MPK-COMPOSE-RESTART"
-	case strings.Contains(message, "service sets differ") || strings.Contains(message, "undeclared service") || strings.Contains(message, "missing declared service"):
-		rule = "MPK-MANIFEST-SERVICE-MISMATCH"
-	case strings.Contains(message, "overlay"):
-		rule = "MPK-MANIFEST-OVERLAY"
-	case strings.Contains(message, "image") && strings.Contains(message, "architecture") && strings.Contains(message, "does not match"):
-		rule = "MPK-IMAGE-ARCH-MISMATCH"
-	case strings.Contains(message, "image"):
-		rule = "MPK-IMAGE"
-	case strings.Contains(message, "tar") || strings.Contains(message, "unsafe path"):
-		rule = "MPK-TAR"
-	case strings.Contains(message, "compose."):
-		rule = "MPK-COMPOSE"
+	var explicit *gateRuleError
+	if errors.As(err, &explicit) && explicit.rule != "" {
+		rule = explicit.rule
+	} else {
+		switch {
+		case strings.Contains(message, "package size") || strings.Contains(message, "expanded package size"):
+			rule = "MPK-SIZE"
+		case strings.Contains(message, "settings.yaml"):
+			rule = "MPK-MANIFEST-LEGACY-SETTINGS"
+		case strings.Contains(message, "dependency application"):
+			rule = "MPK-MANIFEST-DEPENDENCY"
+		case strings.Contains(message, "required asset") || strings.Contains(message, "screenshot") || strings.Contains(message, "icon"):
+			rule = "MPK-ASSET"
+		case strings.Contains(message, "cannot declare ports"):
+			rule = "MPK-COMPOSE-PORTS"
+		case strings.Contains(message, "host network"):
+			rule = "MPK-COMPOSE-HOST-NETWORK"
+		case strings.Contains(message, "cannot declare volumes") || strings.Contains(message, "volumes_from") || strings.Contains(message, "tmpfs"):
+			rule = "MPK-COMPOSE-VOLUMES"
+		case strings.Contains(message, "cannot declare environment") || strings.Contains(message, "env_file"):
+			rule = "MPK-COMPOSE-ENVIRONMENT"
+		case strings.Contains(message, "cannot declare extra_hosts"):
+			rule = "MPK-COMPOSE-EXTRA-HOSTS"
+		case strings.Contains(message, "interpolation") || strings.Contains(message, "variable substitution"):
+			rule = "MPK-COMPOSE-INTERPOLATION"
+		case strings.Contains(message, "platform label"):
+			rule = "MPK-COMPOSE-PLATFORM-LABEL"
+		case strings.Contains(message, "must declare restart") || strings.Contains(message, "oneshot and cannot declare restart"):
+			rule = "MPK-COMPOSE-RESTART"
+		case strings.Contains(message, "service sets differ") || strings.Contains(message, "undeclared service") || strings.Contains(message, "missing declared service"):
+			rule = "MPK-MANIFEST-SERVICE-MISMATCH"
+		case strings.Contains(message, "overlay"):
+			rule = "MPK-MANIFEST-OVERLAY"
+		case strings.Contains(message, "image") && strings.Contains(message, "architecture") && strings.Contains(message, "does not match"):
+			rule = "MPK-IMAGE-ARCH-MISMATCH"
+		case strings.Contains(message, "image"):
+			rule = "MPK-IMAGE"
+		case strings.Contains(message, "tar") || strings.Contains(message, "unsafe path"):
+			rule = "MPK-TAR"
+		case strings.Contains(message, "compose."):
+			rule = "MPK-COMPOSE"
+		}
 	}
 	return &GateError{Finding: GateFinding{
 		RuleID: rule, Path: gateFindingPath(message), Context: gateFindingContext(message), Message: message,

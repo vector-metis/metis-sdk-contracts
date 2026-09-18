@@ -14,6 +14,11 @@ restart: unless-stopped
 
 一次性任务 service 可以使用 `x-metis.oneshot: true`，并省略 `restart` 或声明 `restart: no`。一次性任务不应使用其它重启策略。
 
+当前 MPK v1 的路径契约要求：沙箱 source 在生成的 Compose 中使用应用 scope 下的相对目录
+（`./program`、`./config`、`./data`、`./log`、`./tmp`），overlay 必须保留在 `overlay/` 层并使用
+`./overlay` 或 `./overlay/...` 显式声明只读挂载。平台不再生成或注入 `METIS_DIR_*`；旧的 overlay
+source 写法不会被自动改写。
+
 ## 开发
 
 ```bash

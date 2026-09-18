@@ -50,7 +50,7 @@ type InstallOptions struct {
 	ContractOnly bool
 }
 
-// InstallPlan 是平台执行前得到的只读安装计划，Compose 是展平后的部署副本。
+// InstallPlan 是平台执行前得到的只读安装计划，Compose 是应用 scope 下的部署副本。
 type InstallPlan struct {
 	Manifest    Manifest
 	Settings    []Setting
@@ -150,7 +150,7 @@ func planPreparedInstall(metadata PackageMetadata, options InstallOptions, requi
 		return nil, err
 	}
 	addResourceLimits(raw.Services)
-	injectPlatformEnvironment(manifest, raw.Services, environment, options.BaseDir)
+	injectPlatformEnvironment(manifest, raw.Services, environment)
 	if err := injectPlatformHosts(raw.Services, options.PublicHost, options.MasterIP); err != nil {
 		return nil, err
 	}
@@ -354,9 +354,6 @@ func installEnvironment(manifest Manifest, definitions []Setting, services map[s
 		"METIS_APP_ID":      manifest.ID,
 		"METIS_APP_NAME":    manifest.DisplayName,
 		"METIS_APP_VERSION": manifest.Version,
-		"METIS_DIR_PROGRAM": options.BaseDir + "/program", "METIS_DIR_CONFIG": options.BaseDir + "/config",
-		"METIS_DIR_DATA": options.BaseDir + "/data", "METIS_DIR_LOG": options.BaseDir + "/log",
-		"METIS_DIR_TMP": options.BaseDir + "/tmp",
 	}
 	settingValues := make(map[string]struct{}, len(definitions))
 	for _, definition := range definitions {
@@ -371,7 +368,7 @@ func installEnvironment(manifest Manifest, definitions []Setting, services map[s
 	slotNames := make([]string, 0)
 	for name := range placeholders {
 		switch {
-		case name == "METIS_APP_ID" || name == "METIS_APP_NAME" || name == "METIS_APP_VERSION" || strings.HasPrefix(name, "METIS_DIR_"):
+		case name == "METIS_APP_ID" || name == "METIS_APP_NAME" || name == "METIS_APP_VERSION":
 			continue
 		case strings.HasPrefix(name, "METIS_SETTING_"):
 			if _, declared := settingValues[name]; !declared {
@@ -547,9 +544,9 @@ func capabilityDefaults(manifest Manifest, options InstallOptions, environment m
 	return nil
 }
 
-// injectPlatformEnvironment 把统一身份和沙箱目录注入全部 service，
+// injectPlatformEnvironment 把统一身份注入全部 service，
 // 把 S3、模型、端口等敏感或具名运行事实限制在 manifest 明确声明的 service。
-func injectPlatformEnvironment(manifest Manifest, services map[string]map[string]any, environment map[string]string, baseDir string) {
+func injectPlatformEnvironment(manifest Manifest, services map[string]map[string]any, environment map[string]string) {
 	for serviceName, service := range services {
 		values, _ := service["environment"].(map[string]any)
 		if values == nil {
@@ -568,13 +565,7 @@ func injectPlatformEnvironment(manifest Manifest, services map[string]map[string
 			if len(declaration.Mounts) > 0 {
 				mounts := make([]any, 0, len(declaration.Mounts))
 				for _, mount := range declaration.Mounts {
-					source := mount.Source
-					if !strings.HasPrefix(source, "./") {
-						source = baseDir + "/" + source
-					}
-					if strings.HasPrefix(mount.Source, "./") {
-						source = baseDir + "/overlay/" + strings.TrimPrefix(mount.Source, "./")
-					}
+					source := "./" + mount.Source
 					mounts = append(mounts, map[string]any{"type": "bind", "source": source, "target": mount.Target, "read_only": mount.ReadOnly, "bind": map[string]any{"create_host_path": false}})
 				}
 				service["volumes"] = mounts
@@ -582,11 +573,6 @@ func injectPlatformEnvironment(manifest Manifest, services map[string]map[string
 		}
 		for _, name := range []string{"METIS_APP_ID", "METIS_PLATFORM_ENDPOINT", "METIS_APP_TOKEN"} {
 			values[name] = environment[name]
-		}
-		for name, value := range environment {
-			if strings.HasPrefix(name, "METIS_DIR_") {
-				values[name] = value
-			}
 		}
 		if declaration, exists := manifest.Services[serviceName]; exists {
 			if _, requested := declaration.Capabilities["object-storage"]; requested {
