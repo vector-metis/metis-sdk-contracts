@@ -565,7 +565,13 @@ func injectPlatformEnvironment(manifest Manifest, services map[string]map[string
 			if len(declaration.Mounts) > 0 {
 				mounts := make([]any, 0, len(declaration.Mounts))
 				for _, mount := range declaration.Mounts {
-					source := "./" + mount.Source
+					// 沙箱目录以裸目录名声明，overlay source 已经带有
+					// `./overlay` 前缀；统一在这里转换为 scope 相对路径，
+					// 避免生成不规范的 `././overlay/...`。
+					source := mount.Source
+					if !strings.HasPrefix(source, "./") {
+						source = "./" + source
+					}
 					mounts = append(mounts, map[string]any{"type": "bind", "source": source, "target": mount.Target, "read_only": mount.ReadOnly, "bind": map[string]any{"create_host_path": false}})
 				}
 				service["volumes"] = mounts

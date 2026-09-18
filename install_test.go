@@ -61,6 +61,44 @@ func TestPlanInstallRendersRepresentativePackage(t *testing.T) {
 	}
 }
 
+// TestPlanInstallKeepsCanonicalOverlaySources 验证 manifest 已声明的
+// ./overlay/... source 在最终 Compose 中保持规范化，不会被重复加前缀。
+func TestPlanInstallKeepsCanonicalOverlaySources(t *testing.T) {
+	data := buildMPK(t, func(files map[string][]byte) {
+		manifest := string(files["manifest.yaml"])
+		manifest = strings.Replace(manifest,
+			"      - {name: web, protocol: http, container_port: 8080}\n",
+			"      - {name: web, protocol: http, container_port: 8080}\n    mounts:\n      - {source: ./overlay/config.yaml, target: /etc/app.yaml, read_only: true}\n      - {source: ./overlay/static, target: /usr/share/nginx/html, read_only: true}\n",
+			1)
+		files["manifest.yaml"] = []byte(manifest)
+		files["overlay/config.yaml"] = []byte("enabled: true\n")
+		files["overlay/static/index.html"] = []byte("<main>overlay</main>\n")
+	})
+	plan, err := contract.PlanInstall(bytes.NewReader(data), contract.InstallOptions{
+		Architecture: contract.ArchAMD64,
+		BaseDir:      "/var/lib/metis/apps/overlay-a7x2m",
+		PublicHost:   "platform.example.invalid",
+		MasterIP:     "10.0.0.10",
+		ExtraEnvironment: map[string]string{
+			"METIS_PLATFORM_ENDPOINT": "http://platform.example.invalid",
+			"METIS_APP_TOKEN":         "token",
+		},
+		AssignPort: func(string) (int, error) { return 22001, nil },
+	})
+	if err != nil {
+		t.Fatalf("PlanInstall() error = %v", err)
+	}
+	rendered := string(plan.Compose)
+	for _, want := range []string{"source: ./overlay/config.yaml", "source: ./overlay/static"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("install plan does not contain canonical overlay source %q:\n%s", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "././overlay") {
+		t.Fatalf("install plan contains duplicated overlay prefix:\n%s", rendered)
+	}
+}
+
 // TestPlanInstallPreservesAllowedComposeFields 固化普通 Compose 属性在人工审核通过后
 // 会进入最终部署副本；平台只替换其负责生成的 services 运行事实。
 func TestPlanInstallPreservesAllowedComposeFields(t *testing.T) {
