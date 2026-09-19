@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	contract "github.com/vector-metis/metis-sdk-contracts"
+	"gopkg.in/yaml.v3"
 )
 
 func dockerArchive(t *testing.T, tags ...string) []byte {
@@ -30,6 +31,30 @@ func dockerArchiveForArchitecture(t *testing.T, architecture string, tags ...str
 		t.Fatal(err)
 	}
 	manifest := `[{"Config":"config.json","RepoTags":["` + tags[0] + `"]}]`
+	if err := writer.WriteHeader(&tar.Header{Name: "manifest.json", Size: int64(len(manifest)), Mode: 0o644}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte(manifest)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return archive.Bytes()
+}
+
+func dockerArchiveWithVolume(t *testing.T, architecture, tag, target string) []byte {
+	t.Helper()
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	config := `{"architecture":"` + architecture + `","os":"linux","config":{"Volumes":{"` + target + `":{}}}}`
+	if err := writer.WriteHeader(&tar.Header{Name: "config.json", Size: int64(len(config)), Mode: 0o644}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte(config)); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `[{"Config":"config.json","RepoTags":["` + tag + `"]}]`
 	if err := writer.WriteHeader(&tar.Header{Name: "manifest.json", Size: int64(len(manifest)), Mode: 0o644}); err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +94,15 @@ services:
 	if mutate != nil {
 		mutate(files)
 	}
+	preserveComposeLifecycle := false
+	if _, exists := files["__preserve_compose_lifecycle"]; exists {
+		preserveComposeLifecycle = true
+		delete(files, "__preserve_compose_lifecycle")
+	}
+	normalizeFixtureManifest(t, files)
+	if !preserveComposeLifecycle {
+		normalizeFixtureCompose(t, files)
+	}
 	var raw bytes.Buffer
 	gzipWriter := gzip.NewWriter(&raw)
 	tarWriter := tar.NewWriter(gzipWriter)
@@ -87,6 +121,59 @@ services:
 		t.Fatal(err)
 	}
 	return raw.Bytes()
+}
+
+// normalizeFixtureManifest keeps older contract fixtures focused on their own
+// assertion while making the new lifecycle field explicit in every service.
+func normalizeFixtureManifest(t *testing.T, files map[string][]byte) {
+	t.Helper()
+	var document map[string]any
+	if err := yaml.Unmarshal(files["manifest.yaml"], &document); err != nil {
+		return
+	}
+	services, ok := document["services"].(map[string]any)
+	if !ok {
+		return
+	}
+	for _, raw := range services {
+		service, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, exists := service["lifecycle"]; !exists {
+			service["lifecycle"] = map[string]any{"restart": "unless-stopped"}
+		}
+	}
+	content, err := yaml.Marshal(document)
+	if err == nil {
+		files["manifest.yaml"] = content
+	}
+}
+
+func normalizeFixtureCompose(t *testing.T, files map[string][]byte) {
+	t.Helper()
+	for name, content := range files {
+		if !strings.HasPrefix(name, "compose.") || !strings.HasSuffix(name, ".yaml") {
+			continue
+		}
+		var document map[string]any
+		if err := yaml.Unmarshal(content, &document); err != nil {
+			continue
+		}
+		services, ok := document["services"].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, raw := range services {
+			if service, ok := raw.(map[string]any); ok {
+				delete(service, "restart")
+				delete(service, "x-metis")
+			}
+		}
+		if normalized, err := yaml.Marshal(document); err == nil {
+			files[name] = normalized
+		}
+	}
 }
 
 func pngFixture(t *testing.T, width, height int) []byte {
@@ -112,49 +199,6 @@ func TestValidateMPKAcceptsValidPackage(t *testing.T) {
 	}
 	if summary.Manifest.Version != "1.0.0" || summary.Manifest.Type != contract.ApplicationTypeWeb || summary.Manifest.Services["web"].Endpoints[0].ContainerPort != 8080 || summary.SHA256 == "" {
 		t.Fatalf("unexpected summary: %+v", summary)
-	}
-}
-
-func TestValidateMPKRequiresRestartPolicyForLongRunningServices(t *testing.T) {
-	data := buildMPK(t, func(files map[string][]byte) {
-		files["compose.amd64.yaml"] = []byte(`services:
-  web:
-    image: demo-a7x2m/web:1.0.0
-`)
-	})
-	_, err := validate(t, data)
-	if err == nil || !strings.Contains(err.Error(), "must declare restart: unless-stopped") {
-		t.Fatalf("ValidateMPK() error = %v, want restart policy rejection", err)
-	}
-}
-
-func TestValidateMPKAllowsExplicitOneShotService(t *testing.T) {
-	data := buildMPK(t, func(files map[string][]byte) {
-		files["compose.amd64.yaml"] = []byte(`services:
-  web:
-    image: demo-a7x2m/web:1.0.0
-    x-metis:
-      oneshot: true
-`)
-	})
-	if _, err := validate(t, data); err != nil {
-		t.Fatalf("ValidateMPK() error = %v, want one-shot service to pass", err)
-	}
-}
-
-func TestValidateMPKRejectsRestartedOneShotService(t *testing.T) {
-	data := buildMPK(t, func(files map[string][]byte) {
-		files["compose.amd64.yaml"] = []byte(`services:
-  web:
-    image: demo-a7x2m/web:1.0.0
-    restart: always
-    x-metis:
-      oneshot: true
-`)
-	})
-	_, err := validate(t, data)
-	if err == nil || !strings.Contains(err.Error(), "oneshot and cannot declare restart") {
-		t.Fatalf("ValidateMPK() error = %v, want one-shot restart rejection", err)
 	}
 }
 
@@ -399,7 +443,7 @@ func TestValidateMPKRejectsExtraHosts(t *testing.T) {
   web:
     image: demo-a7x2m/web:1.0.0
     restart: unless-stopped
-    extra_hosts: ["example.invalid:192.0.2.10"]
+    extra_hosts: ["example.internal:192.0.2.10"]
 `)
 	})
 

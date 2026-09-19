@@ -66,8 +66,22 @@ type EnvironmentSource struct {
 // Mount 描述平台生成的沙箱或 overlay 挂载。
 type Mount struct {
 	Source   string `yaml:"source" json:"source"`
+	Subpath  string `yaml:"subpath,omitempty" json:"subpath,omitempty"`
 	Target   string `yaml:"target" json:"target"`
 	ReadOnly bool   `yaml:"read_only,omitempty" json:"readOnly,omitempty"`
+}
+
+// ServiceLifecycle 描述 Master 对 Compose service 的期望生命周期。
+// 常驻 service 必须显式声明 unless-stopped；oneshot service 由平台生成 restart: no。
+type ServiceLifecycle struct {
+	Restart  string `yaml:"restart,omitempty" json:"restart,omitempty"`
+	Oneshot  bool   `yaml:"oneshot,omitempty" json:"oneshot,omitempty"`
+	Required *bool  `yaml:"required,omitempty" json:"required,omitempty"`
+}
+
+// IsRequired 返回服务是否参与 Master 的必需服务门禁；省略时保持常驻服务默认必需。
+func (lifecycle ServiceLifecycle) IsRequired() bool {
+	return lifecycle.Required == nil || *lifecycle.Required
 }
 
 // CapabilityRequest 是 service 对平台能力的最小声明。
@@ -78,7 +92,26 @@ type CapabilityRequest struct {
 
 // ModelSlot 是 manifest 顶层声明的模型插槽。
 type ModelSlot struct {
-	Interface string `yaml:"interface" json:"interface"`
+	Interface  string   `yaml:"interface" json:"interface"`
+	Traits     []string `yaml:"traits,omitempty" json:"traits,omitempty"`
+	Dimensions int      `yaml:"dimensions,omitempty" json:"dimensions,omitempty"`
+	Required   *bool    `yaml:"required,omitempty" json:"required,omitempty"`
+}
+
+// ModelTraits 是允许声明的模型特性能力闭集。
+var ModelTraits = map[string]struct{}{
+	"vision":   {},
+	"thinking": {},
+	"tools":    {},
+}
+
+// IsSlotRequired 判断模型插槽是否必选。
+// 规则：若 slot.Required != nil 则使用显式配置；否则主槽（以 .0 结尾）默认为必选，扩展槽（如 .1 ~ .9）默认为可选。
+func IsSlotRequired(slotName string, slot ModelSlot) bool {
+	if slot.Required != nil {
+		return *slot.Required
+	}
+	return strings.HasSuffix(slotName, ".0")
 }
 
 // ManifestService 是 manifest.services 中的单个 Compose service 声明。
@@ -87,6 +120,7 @@ type ManifestService struct {
 	Environment  map[string]EnvironmentSource `yaml:"environment" json:"environment"`
 	Mounts       []Mount                      `yaml:"mounts" json:"mounts"`
 	Capabilities map[string]CapabilityRequest `yaml:"capabilities" json:"capabilities"`
+	Lifecycle    ServiceLifecycle             `yaml:"lifecycle" json:"lifecycle"`
 }
 
 // Capabilities 是应用唯一允许请求的平台资源闭集。
@@ -265,13 +299,18 @@ func rejectUnknownManifestFields(value *yaml.Node) error {
 			}
 		case "models":
 			for _, item := range mappingValues(pair.value) {
-				if err := rejectMappingKeys(item, map[string]struct{}{"interface": {}}); err != nil {
+				if err := rejectMappingKeys(item, map[string]struct{}{
+					"interface":  {},
+					"traits":     {},
+					"dimensions": {},
+					"required":   {},
+				}); err != nil {
 					return err
 				}
 			}
 		case "services":
 			for _, service := range mappingValues(pair.value) {
-				if err := rejectMappingKeys(service, map[string]struct{}{"endpoints": {}, "environment": {}, "mounts": {}, "capabilities": {}}); err != nil {
+				if err := rejectMappingKeys(service, map[string]struct{}{"endpoints": {}, "environment": {}, "mounts": {}, "capabilities": {}, "lifecycle": {}}); err != nil {
 					return err
 				}
 				for _, servicePair := range mappingPairs(service) {
@@ -290,9 +329,13 @@ func rejectUnknownManifestFields(value *yaml.Node) error {
 						}
 					case "mounts":
 						for _, mount := range sequenceItems(servicePair.value) {
-							if err := rejectMappingKeys(mount, map[string]struct{}{"source": {}, "target": {}, "read_only": {}}); err != nil {
+							if err := rejectMappingKeys(mount, map[string]struct{}{"source": {}, "subpath": {}, "target": {}, "read_only": {}}); err != nil {
 								return err
 							}
+						}
+					case "lifecycle":
+						if err := rejectMappingKeys(servicePair.value, map[string]struct{}{"restart": {}, "oneshot": {}, "required": {}}); err != nil {
+							return err
 						}
 					case "capabilities":
 						for _, capability := range mappingValues(servicePair.value) {
@@ -449,36 +492,36 @@ func validateWebEndpoints(services map[string]ManifestService) error {
 	for serviceName, service := range services {
 		for _, endpoint := range service.Endpoints {
 			if endpoint.Protocol != EndpointProtocolHTTP {
-				return fmt.Errorf("manifest: web service %q can only declare http endpoints", serviceName)
+				return withGateRule("MPK-MANIFEST-ENDPOINT", fmt.Errorf("manifest: web service %q can only declare http endpoints", serviceName))
 			}
 			if endpoint.Service != "" && endpoint.Service != serviceName {
-				return fmt.Errorf("manifest: endpoint %q references unknown service %q", endpoint.Name, endpoint.Service)
+				return withGateRule("MPK-MANIFEST-ENDPOINT", fmt.Errorf("manifest: endpoint %q references unknown service %q", endpoint.Name, endpoint.Service))
 			}
 			count++
 		}
 	}
 	if count != 1 {
-		return fmt.Errorf("manifest: web application requires exactly one http endpoint")
+		return withGateRule("MPK-MANIFEST-ENDPOINT", fmt.Errorf("manifest: web application requires exactly one http endpoint"))
 	}
-	return validateServiceEndpoints(flattenEndpoints(services), true)
+	return withGateRule("MPK-MANIFEST-ENDPOINT", validateServiceEndpoints(flattenEndpoints(services), true))
 }
 
 func validateServiceManifestEndpoints(services map[string]ManifestService) error {
 	endpoints := flattenEndpoints(services)
 	if len(endpoints) == 0 {
-		return fmt.Errorf("manifest: service application requires at least one endpoint")
+		return withGateRule("MPK-MANIFEST-ENDPOINT", fmt.Errorf("manifest: service application requires at least one endpoint"))
 	}
 	for serviceName, declaration := range services {
 		for _, endpoint := range declaration.Endpoints {
 			if endpoint.Service != "" && endpoint.Service != serviceName {
-				return fmt.Errorf("manifest: endpoint %q must belong to its declaring service %q", endpoint.Name, serviceName)
+				return withGateRule("MPK-MANIFEST-ENDPOINT", fmt.Errorf("manifest: endpoint %q must belong to its declaring service %q", endpoint.Name, serviceName))
 			}
 			if endpoint.Protocol != EndpointProtocolTCP && endpoint.Protocol != EndpointProtocolUDP {
-				return fmt.Errorf("manifest: service endpoint %q must use tcp or udp", endpoint.Name)
+				return withGateRule("MPK-MANIFEST-ENDPOINT", fmt.Errorf("manifest: service endpoint %q must use tcp or udp", endpoint.Name))
 			}
 		}
 	}
-	return validateServiceEndpoints(endpoints, false)
+	return withGateRule("MPK-MANIFEST-ENDPOINT", validateServiceEndpoints(endpoints, false))
 }
 
 func flattenEndpoints(services map[string]ManifestService) []ServiceEndpoint {
@@ -545,6 +588,9 @@ func validateServiceEnvironment(services map[string]ManifestService, settings []
 		known[setting.Key] = struct{}{}
 	}
 	for serviceName, service := range services {
+		if err := validateServiceLifecycle(serviceName, service.Lifecycle); err != nil {
+			return err
+		}
 		for name, source := range service.Environment {
 			if name == "" || strings.HasPrefix(name, "METIS_") {
 				return fmt.Errorf("manifest: service %q has invalid environment name %q", serviceName, name)
@@ -567,22 +613,24 @@ func validateServiceEnvironment(services map[string]ManifestService, settings []
 		seenTargets := make(map[string]struct{}, len(service.Mounts))
 		for _, mount := range service.Mounts {
 			if mount.Target == "" || !strings.HasPrefix(mount.Target, "/") || mount.Target == "/" {
-				return fmt.Errorf("manifest: service %q mount target must be an absolute non-root path", serviceName)
+				return withGateRule("MPK-MANIFEST-MOUNT", fmt.Errorf("manifest: service %q mount target must be an absolute non-root path", serviceName))
 			}
 			target := path.Clean(mount.Target)
 			if isReservedMountTarget(target) {
-				return fmt.Errorf("manifest: service %q mount target %q is reserved", serviceName, mount.Target)
+				return withGateRule("MPK-MANIFEST-MOUNT", fmt.Errorf("manifest: service %q mount target %q is reserved", serviceName, mount.Target))
 			}
 			if _, exists := seenTargets[target]; exists {
-				return fmt.Errorf("manifest: service %q has duplicate mount target %q", serviceName, mount.Target)
+				return withGateRule("MPK-MANIFEST-MOUNT", fmt.Errorf("manifest: service %q has duplicate mount target %q", serviceName, mount.Target))
 			}
 			seenTargets[target] = struct{}{}
-			switch mount.Source {
-			case "program", "config", "data", "log", "tmp":
-			default:
-				if !isOverlayMountSource(mount.Source) || !mount.ReadOnly {
-					return withGateRule("MPK-MANIFEST-MOUNT", fmt.Errorf("manifest: service %q has invalid mount source %q", serviceName, mount.Source))
-				}
+			if !isManagedMountSource(mount.Source) {
+				return withGateRule("MPK-MANIFEST-MOUNT", fmt.Errorf("manifest: service %q has invalid mount source %q", serviceName, mount.Source))
+			}
+			if !isCanonicalManagedSubpath(mount.Subpath) {
+				return withGateRule("MPK-MANIFEST-MOUNT", fmt.Errorf("manifest: service %q has invalid mount subpath %q", serviceName, mount.Subpath))
+			}
+			if mount.Source == "overlay" && !mount.ReadOnly {
+				return withGateRule("MPK-MANIFEST-MOUNT", fmt.Errorf("manifest: service %q overlay mount must be read-only", serviceName))
 			}
 		}
 	}
@@ -594,18 +642,50 @@ func validateServiceEnvironment(services map[string]ManifestService, settings []
 	return nil
 }
 
-// isOverlayMountSource 只接受应用 scope 中 overlay 目录的规范化相对路径。
-// source 必须保留 ./overlay 前缀，并且必须是规范化路径，避免 ./overlay/../... 绕过根目录限制；
-// 包内成员是否存在由 MPK 元数据门禁继续校验。
-func isOverlayMountSource(source string) bool {
-	if !strings.HasPrefix(source, "./") {
+func validateServiceLifecycle(serviceName string, lifecycle ServiceLifecycle) error {
+	if lifecycle.Oneshot {
+		if lifecycle.Restart != "" && lifecycle.Restart != "no" {
+			return withGateRule("MPK-MANIFEST-LIFECYCLE", fmt.Errorf("manifest: service %q oneshot lifecycle must omit restart or use no", serviceName))
+		}
+		return nil
+	}
+	if lifecycle.Restart != "unless-stopped" {
+		return withGateRule("MPK-MANIFEST-LIFECYCLE", fmt.Errorf("manifest: service %q must declare lifecycle.restart: unless-stopped", serviceName))
+	}
+	return nil
+}
+
+func isManagedMountSource(source string) bool {
+	switch source {
+	case "program", "config", "data", "log", "tmp", "overlay":
+		return true
+	default:
 		return false
 	}
-	relative := strings.TrimPrefix(source, "./")
-	if relative != "overlay" && !strings.HasPrefix(relative, "overlay/") {
+}
+
+// isCanonicalManagedSubpath 只接受 managed mount root 下的规范化相对路径。
+func isCanonicalManagedSubpath(subpath string) bool {
+	if subpath == "" || path.IsAbs(subpath) || strings.ContainsRune(subpath, '\x00') || strings.Contains(subpath, "\\") {
+		return subpath == ""
+	}
+	if path.Clean(subpath) != subpath || strings.HasPrefix(subpath, "../") || subpath == ".." ||
+		strings.HasPrefix(subpath, "/") || strings.HasSuffix(subpath, "/") || strings.Contains(subpath, "//") {
 		return false
 	}
-	return path.Clean(source) == relative
+	for _, part := range strings.Split(subpath, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func managedMountPath(mount Mount) string {
+	if mount.Subpath == "" {
+		return mount.Source
+	}
+	return mount.Source + "/" + mount.Subpath
 }
 
 func isReservedMountTarget(target string) bool {
@@ -665,8 +745,32 @@ func validateServiceCapabilities(services map[string]ManifestService, models map
 			return nil, fmt.Errorf("manifest: model slot %q interface is required", slot)
 		}
 		parts := strings.SplitN(slot, ".", 2)
-		if _, allowed := ModelInterfaces[parts[0]][declaration.Interface]; !allowed {
+		modelType := parts[0]
+		if _, allowed := ModelInterfaces[modelType][declaration.Interface]; !allowed {
 			return nil, fmt.Errorf("manifest: model slot %q does not support interface %q", slot, declaration.Interface)
+		}
+		if len(declaration.Traits) > 0 {
+			if modelType != "llm" {
+				return nil, fmt.Errorf("manifest: model slot %q does not support traits", slot)
+			}
+			seenTrait := make(map[string]struct{}, len(declaration.Traits))
+			for _, trait := range declaration.Traits {
+				if _, allowed := ModelTraits[trait]; !allowed {
+					return nil, fmt.Errorf("manifest: model slot %q has unsupported trait %q", slot, trait)
+				}
+				if _, dup := seenTrait[trait]; dup {
+					return nil, fmt.Errorf("manifest: model slot %q has duplicate trait %q", slot, trait)
+				}
+				seenTrait[trait] = struct{}{}
+			}
+		}
+		if declaration.Dimensions != 0 {
+			if modelType != "embedding" {
+				return nil, fmt.Errorf("manifest: model slot %q does not support dimensions", slot)
+			}
+			if declaration.Dimensions <= 0 {
+				return nil, fmt.Errorf("manifest: model slot %q dimensions must be greater than 0", slot)
+			}
 		}
 	}
 	seen := make(map[string]struct{})

@@ -52,13 +52,13 @@ func TestPlanPreparedInstallAppliesComposeOverridesLast(t *testing.T) {
 	plan, err := contract.PlanPreparedInstall(metadata, contract.InstallOptions{
 		Architecture: contract.ArchAMD64,
 		BaseDir:      "/var/lib/metis/apps/override-app-a7x2m",
-		PublicHost:   "platform.example.invalid",
+		PublicHost:   "metis.internal",
 		MasterIP:     "10.0.0.10",
 		ImageReferences: map[string]string{
-			"override-app-a7x2m/web:1.0.0": "platform.example.invalid/override-app-a7x2m/web:1.0.0",
+			"override-app-a7x2m/web:1.0.0": "metis.internal/override-app-a7x2m/web:1.0.0",
 		},
 		ExtraEnvironment: map[string]string{
-			"METIS_PLATFORM_ENDPOINT": "http://platform.example.invalid",
+			"METIS_PLATFORM_ENDPOINT": "http://metis.internal",
 			"METIS_APP_TOKEN":         "token",
 		},
 		AssignPort: func(string) (int, error) { return 22001, nil },
@@ -102,7 +102,7 @@ extra_hosts: null
 		t.Fatalf("yaml.Unmarshal() error = %v", err)
 	}
 	web := document.Services["web"]
-	if got := web["image"]; got != "platform.example.invalid/override-app-a7x2m/web:1.0.0" {
+	if got := web["image"]; got != "metis.internal/override-app-a7x2m/web:1.0.0" {
 		t.Fatalf("image = %#v", got)
 	}
 	command, ok := web["command"].([]any)
@@ -143,13 +143,13 @@ func TestPlanPreparedInstallRequiresDeclaredComposeOverride(t *testing.T) {
 	_, err := contract.PlanPreparedInstall(metadata, contract.InstallOptions{
 		Architecture: contract.ArchAMD64,
 		BaseDir:      "/var/lib/metis/apps/override-app-a7x2m",
-		PublicHost:   "platform.example.invalid",
+		PublicHost:   "metis.internal",
 		MasterIP:     "10.0.0.10",
 		ImageReferences: map[string]string{
-			"override-app-a7x2m/web:1.0.0": "platform.example.invalid/override-app-a7x2m/web:1.0.0",
+			"override-app-a7x2m/web:1.0.0": "metis.internal/override-app-a7x2m/web:1.0.0",
 		},
 		ExtraEnvironment: map[string]string{
-			"METIS_PLATFORM_ENDPOINT": "http://platform.example.invalid",
+			"METIS_PLATFORM_ENDPOINT": "http://metis.internal",
 			"METIS_APP_TOKEN":         "token",
 		},
 		AssignPort: func(string) (int, error) { return 22001, nil },
@@ -193,13 +193,13 @@ func TestPlanPreparedInstallRejectsInvalidOverrideBindings(t *testing.T) {
 			_, err := contract.PlanPreparedInstall(metadata, contract.InstallOptions{
 				Architecture: contract.ArchAMD64,
 				BaseDir:      "/var/lib/metis/apps/override-app-a7x2m",
-				PublicHost:   "platform.example.invalid",
+				PublicHost:   "metis.internal",
 				MasterIP:     "10.0.0.10",
 				ImageReferences: map[string]string{
-					"override-app-a7x2m/web:1.0.0": "platform.example.invalid/override-app-a7x2m/web:1.0.0",
+					"override-app-a7x2m/web:1.0.0": "metis.internal/override-app-a7x2m/web:1.0.0",
 				},
 				ExtraEnvironment: map[string]string{
-					"METIS_PLATFORM_ENDPOINT": "http://platform.example.invalid",
+					"METIS_PLATFORM_ENDPOINT": "http://metis.internal",
 					"METIS_APP_TOKEN":         "token",
 				},
 				AssignPort:       func(string) (int, error) { return 22001, nil },
@@ -224,6 +224,7 @@ func preparedOverrideMetadata() contract.PackageMetadata {
 			Dependencies:  []contract.Dependency{},
 			Services: map[string]contract.ManifestService{
 				"web": {
+					Lifecycle: contract.ServiceLifecycle{Restart: "unless-stopped"},
 					Endpoints: []contract.ServiceEndpoint{{
 						Name: "web", Service: "web", Protocol: contract.EndpointProtocolHTTP, ContainerPort: 8080,
 					}},

@@ -49,8 +49,8 @@ func InspectPackageAssets(reader io.ReadSeeker, manifest Manifest) ([]PackageAss
 	}
 
 	rules := map[string]packageAssetRule{
-		icon64Name:  {maxSize: MaxIconSize, expectedFormat: "png", width: 64, height: 64},
-		icon256Name: {maxSize: MaxIconSize, expectedFormat: "png", width: 256, height: 256},
+		icon64Name:  {maxSize: MaxIcon64Size, expectedFormat: "png", width: 64, height: 64},
+		icon256Name: {maxSize: MaxIcon256Size, expectedFormat: "png", width: 256, height: 256},
 	}
 	for _, name := range manifest.Screenshots {
 		if err := ValidateScreenshotPath(name); err != nil {
@@ -143,6 +143,18 @@ func inspectPackageAssetTar(reader *tar.Reader, rules map[string]packageAssetRul
 				rule.width,
 				rule.height,
 			)
+		}
+		if strings.HasPrefix(name, "icons/") {
+			decoded, _, err := image.Decode(bytes.NewReader(content))
+			if err != nil {
+				return nil, fmt.Errorf("mpk: asset %q cannot be decoded: %w", name, err)
+			}
+			switch decoded.(type) {
+			case *image.RGBA, *image.NRGBA, *image.RGBA64, *image.NRGBA64:
+				// Accepted PNG formats with an explicit alpha channel.
+			default:
+				return nil, fmt.Errorf("mpk: asset %q must be RGBA PNG with alpha", name)
+			}
 		}
 		assets[name] = PackageAsset{
 			Name:      name,

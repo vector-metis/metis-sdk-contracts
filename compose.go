@@ -9,7 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func validateCompose(manifest Manifest, files map[string][]byte, contractOnly bool) error {
+func validateCompose(manifest Manifest, files map[string][]byte, overlayPaths, overlayDirs map[string]struct{}, contractOnly bool) error {
 	var baseline map[string]struct{}
 	for _, architecture := range manifest.Architectures {
 		name := "compose." + architecture + ".yaml"
@@ -30,7 +30,7 @@ func validateCompose(manifest Manifest, files map[string][]byte, contractOnly bo
 		if len(document.Services) == 0 {
 			return fmt.Errorf("mpk: %s has no services", name)
 		}
-		if err := validateComposeServices(manifest, name, document.Services, files, architecture, contractOnly); err != nil {
+		if err := validateComposeServices(manifest, name, document.Services, files, overlayPaths, overlayDirs, architecture, contractOnly); err != nil {
 			return err
 		}
 		if containsComposeInterpolation(rawDocument) {
@@ -66,6 +66,8 @@ func validateComposeServices(
 	composeName string,
 	services map[string]map[string]any,
 	files map[string][]byte,
+	overlayPaths map[string]struct{},
+	overlayDirs map[string]struct{},
 	architecture string,
 	contractOnly bool,
 ) error {
@@ -92,21 +94,11 @@ func validateComposeServices(
 			return fmt.Errorf("mpk: %s service %q image %q needs a non-reserved tag", composeName, serviceName, image)
 		}
 		composeImages[image] = struct{}{}
-		oneshoot, err := validateComposeRole(composeName, serviceName, service)
-		if err != nil {
-			return err
-		}
-		restart, _ := service["restart"].(string)
-		restart = strings.TrimSpace(restart)
-		if oneshoot {
-			if restart != "" && restart != "no" {
-				return fmt.Errorf("mpk: %s service %q is oneshot and cannot declare restart: %s", composeName, serviceName, restart)
-			}
-		} else if restart != "unless-stopped" {
-			return fmt.Errorf("mpk: %s service %q must declare restart: unless-stopped", composeName, serviceName)
-		}
-		for _, forbidden := range []string{"ports", "environment", "env_file", "volumes", "volumes_from", "tmpfs", "configs", "secrets"} {
+		for _, forbidden := range []string{"ports", "environment", "env_file", "volumes", "volumes_from", "tmpfs", "configs", "secrets", "restart", "x-metis"} {
 			if _, exists := service[forbidden]; exists {
+				if forbidden == "restart" || forbidden == "x-metis" {
+					return withGateRule("MPK-COMPOSE-LIFECYCLE", fmt.Errorf("mpk: %s service %q cannot declare %s; use manifest.yaml lifecycle", composeName, serviceName, forbidden))
+				}
 				return fmt.Errorf("mpk: %s service %q cannot declare %s; use manifest.yaml", composeName, serviceName, forbidden)
 			}
 		}
@@ -131,21 +123,21 @@ func validateComposeServices(
 	}
 	for serviceName, declaration := range manifest.Services {
 		for _, mount := range declaration.Mounts {
-			if !strings.HasPrefix(mount.Source, "./") {
+			if mount.Source != "overlay" {
 				continue
 			}
-			prefix := path.Clean(mount.Source)
-			found := false
-			for name := range files {
-				if name == prefix || strings.HasPrefix(name, prefix+"/") {
-					found = true
-					break
-				}
+			prefix := path.Clean(managedMountPath(mount))
+			_, found := overlayPaths[prefix]
+			if !found {
+				_, found = overlayDirs[prefix]
 			}
 			if !found && prefix == "overlay" {
 				// overlay/ 本身可能只有目录条目；只要包中存在其子项，整棵目录即可作为挂载源。
-				for name := range files {
-					if name == "overlay" || strings.HasPrefix(name, "overlay/") {
+				found = len(overlayPaths) > 0 || len(overlayDirs) > 0
+			}
+			if !found {
+				for name := range overlayPaths {
+					if strings.HasPrefix(name, prefix+"/") {
 						found = true
 						break
 					}
@@ -176,33 +168,6 @@ func validateComposeServices(
 		}
 	}
 	return nil
-}
-
-// validateComposeRole identifies one-shot services whose successful exit is the
-// completion signal rather than a long-running container.
-func validateComposeRole(composeName, serviceName string, service map[string]any) (bool, error) {
-	extension, exists := service["x-metis"]
-	if !exists || extension == nil {
-		return false, nil
-	}
-	values, ok := extension.(map[string]any)
-	if !ok {
-		return false, fmt.Errorf("mpk: %s service %q x-metis must be a mapping", composeName, serviceName)
-	}
-	for key := range values {
-		if key != "required" && key != "oneshot" {
-			return false, fmt.Errorf("mpk: %s service %q x-metis contains unknown field %q", composeName, serviceName, key)
-		}
-	}
-	for _, key := range []string{"required", "oneshot"} {
-		if value, present := values[key]; present {
-			if _, ok := value.(bool); !ok {
-				return false, fmt.Errorf("mpk: %s service %q x-metis.%s must be boolean", composeName, serviceName, key)
-			}
-		}
-	}
-	oneshoot, _ := values["oneshot"].(bool)
-	return oneshoot, nil
 }
 
 func stringMapKeys(value any) map[string]struct{} {

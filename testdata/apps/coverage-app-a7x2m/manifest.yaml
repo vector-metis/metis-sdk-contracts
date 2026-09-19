@@ -19,7 +19,7 @@ dependencies:
   - id: optional-map-a7x2m
     alias: map
     required: false
-    version: "~1.0.0"
+    version: ">=1.0.0 <2.0.0"
 settings:
   site_name: {label: Site name, type: string, required: true}
   log_level: {label: Log level, type: select, required: true, default: info, options: [debug, info, warn]}
@@ -33,11 +33,13 @@ models:
   rerank.0: {interface: openai.rerank}
 services:
   web:
+    lifecycle: {restart: unless-stopped, required: true}
     endpoints:
       - {name: web, protocol: http, container_port: 8080}
     mounts:
       - {source: config, target: /etc/app}
       - {source: data, target: /var/lib/app}
+      - {source: overlay, subpath: etc/app, target: /etc/app/overlay, read_only: true}
     environment:
       APP_ID: {value: "${METIS_APP_ID}"}
       APP_NAME: {value: "${METIS_APP_NAME}"}
@@ -64,6 +66,7 @@ services:
       platform-api: {}
       model-gateway: {slots: [llm.0]}
   infer:
+    lifecycle: {oneshot: true, required: true}
     mounts:
       - {source: log, target: /var/log/app}
       - {source: tmp, target: /tmp/app}

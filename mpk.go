@@ -26,8 +26,14 @@ const (
 // MaxScreenshotSize 限制单张市场截图大小，防止公开商店端点被超大包成员占满内存。
 const MaxScreenshotSize = 16 << 20
 
-// MaxIconSize 限制公开市场图标大小，避免小型资源端点读取异常大文件。
-const MaxIconSize = 4 << 20
+// MaxIcon64Size 限制 64 像素应用图标大小。
+const MaxIcon64Size = 128 << 10
+
+// MaxIcon256Size 限制 256 像素应用图标大小，避免资源端点读取异常大文件。
+const MaxIcon256Size = 512 << 10
+
+// MaxIconSize 保留为公开资源读取上限，等于最大规格图标大小。
+const MaxIconSize = MaxIcon256Size
 
 // ErrScreenshotNotFound 表示市场资源缺失或未声明，同时不泄漏商店内部错误哨兵。
 var ErrScreenshotNotFound = errors.New("mpk: screenshot not found")
@@ -107,13 +113,14 @@ func buildSourceMPK(sourceDir string, output io.Writer, contractOnly bool) error
 		if walkErr != nil {
 			return walkErr
 		}
+		relative, err := filepath.Rel(sourceDir, itemPath)
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(relative)
 		if item.IsDir() {
-			// 空的 overlay 目录也是有意义的挂载源，必须保留目录条目。
-			relative, err := filepath.Rel(sourceDir, itemPath)
-			if err != nil {
-				return err
-			}
-			name := filepath.ToSlash(relative)
+			// Empty overlay directories are meaningful mount sources and must
+			// survive packaging even when they contain no regular files.
 			if name == "overlay" || strings.HasPrefix(name, "overlay/") {
 				entries = append(entries, sourceEntry{name: strings.TrimSuffix(name, "/") + "/", path: itemPath, dir: true})
 			}
@@ -122,11 +129,6 @@ func buildSourceMPK(sourceDir string, output io.Writer, contractOnly bool) error
 		if !item.Type().IsRegular() {
 			return fmt.Errorf("mpk: contract source %q contains a non-regular file", itemPath)
 		}
-		relative, err := filepath.Rel(sourceDir, itemPath)
-		if err != nil {
-			return err
-		}
-		name := filepath.ToSlash(relative)
 		if contractOnly && name == "README.md" {
 			return nil
 		}
@@ -196,7 +198,7 @@ func ReadMPKScreenshot(reader io.ReadSeeker, name string) ([]byte, error) {
 
 // ReadMPKIcon 从包内提取固定路径的 256 像素 PNG 市场图标。
 func ReadMPKIcon(reader io.ReadSeeker) ([]byte, error) {
-	return readMPKMember(reader, "icons/icon-256.png", MaxIconSize, ErrIconNotFound)
+	return readMPKMember(reader, "icons/icon-256.png", MaxIcon256Size, ErrIconNotFound)
 }
 
 // readMPKMember 只读取一个已知安全的普通文件，并统一限制公开资源大小。
@@ -244,14 +246,15 @@ func readMPKMember(reader io.ReadSeeker, name string, maxSize int64, notFound er
 	}
 }
 
-// OverlayTree 是包内 overlay 的逻辑目录树，目录和文件分开保存，因而空目录
+// OverlayTree 是包内 overlay 的逻辑目录树。目录和文件分开保存，因而空目录
 // 也能作为合法的目录挂载源传递到 Agent。
 type OverlayTree struct {
 	Files       map[string][]byte
 	Directories map[string]struct{}
 }
 
-// ReadMPKOverlay 提取包内 overlay 下的全部普通文件；目录信息请使用 ReadMPKOverlayTree。
+// ReadMPKOverlay 提取包内 overlay 下的全部普通文件；升级用它做整树确定性比较。
+// 目录信息请使用 ReadMPKOverlayTree。
 func ReadMPKOverlay(reader io.ReadSeeker) (map[string][]byte, error) {
 	tree, err := ReadMPKOverlayTree(reader)
 	if err != nil {
@@ -291,9 +294,6 @@ func ReadMPKOverlayTree(reader io.ReadSeeker) (OverlayTree, error) {
 		}
 		cleaned = strings.TrimPrefix(cleaned, "overlay/")
 		if cleaned == "" || cleaned == "." {
-			continue
-		}
-		if !strings.HasPrefix(header.Name, "overlay/") {
 			continue
 		}
 		found = true

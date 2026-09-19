@@ -16,7 +16,7 @@ import (
 	contract "github.com/vector-metis/metis-sdk-contracts"
 )
 
-// buildContractFixture 从 apps/ 源码构建纯契约包；它不包含 Docker 镜像归档。
+// buildContractFixture 从仓库内 testdata/apps/ 源码构建纯契约包；它不包含 Docker 镜像归档。
 func buildContractFixture(t *testing.T, appID string) []byte {
 	t.Helper()
 	var output bytes.Buffer
@@ -108,6 +108,45 @@ func TestBuildContractMPKIsDeterministicAndRejectsImages(t *testing.T) {
 	}
 }
 
+func TestBuildContractMPKPreservesEmptyOverlayDirectory(t *testing.T) {
+	t.Parallel()
+	source := t.TempDir()
+	for name, content := range map[string]string{
+		"manifest.yaml":      "schema_version: 1\nid: empty-overlay-a7x2m\nversion: 1.0.0\ndisplay_name: Empty Overlay\ntype: web\narch: [amd64]\ndependencies: []\nservices:\n  web:\n    lifecycle: {restart: unless-stopped}\n    endpoints: [{name: web, protocol: http, container_port: 8080}]\n    mounts: [{source: overlay, subpath: static, target: /usr/share/nginx/html, read_only: true}]\n",
+		"compose.amd64.yaml": "services:\n  web:\n    image: empty-overlay-a7x2m/web:1.0.0\n",
+	} {
+		path := filepath.Join(source, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(source, "overlay", "static"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var packageData bytes.Buffer
+	if err := contract.BuildContractMPK(source, &packageData); err != nil {
+		t.Fatal(err)
+	}
+	tree, err := contract.ReadMPKOverlayTree(bytes.NewReader(packageData.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := tree.Directories["static"]; !ok {
+		t.Fatalf("overlay directories = %#v, want static", tree.Directories)
+	}
+	if len(tree.Files) != 0 {
+		t.Fatalf("overlay files = %#v, want empty", tree.Files)
+	}
+	if _, err := contract.ValidateMPK(bytes.NewReader(packageData.Bytes()), contract.ValidateOptions{
+		ExpectedAppID: "empty-overlay-a7x2m", ContractOnly: true,
+	}); err != nil {
+		t.Fatalf("ValidateMPK() error = %v, want empty directory mount accepted", err)
+	}
+}
+
 // TestCoverageAppPackage 基于开发者文档固化完整包面：双架构、全部能力、
 // 五类配置、三类模型插槽、依赖注入、截图、图标和 overlay。
 func TestCoverageAppPackage(t *testing.T) {
@@ -189,7 +228,7 @@ func TestPlanCoverageAppInstallsBothArchitectures(t *testing.T) {
 	for _, architecture := range []string{contract.ArchAMD64, contract.ArchARM64} {
 		plan, err := contract.PlanInstall(bytes.NewReader(data), contract.InstallOptions{
 			Architecture: architecture, BaseDir: "/var/lib/metis/apps/coverage", ContractOnly: true,
-			PublicHost: "platform.example.invalid", MasterIP: "10.0.0.10",
+			PublicHost: "metis.internal", MasterIP: "10.0.0.10",
 			Settings: map[string]string{
 				"site_name": "Coverage", "log_level": "debug", "max_upload_mb": "64",
 				"enable_audit": "false", "webhook_token": "webhook",

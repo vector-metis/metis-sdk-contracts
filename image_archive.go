@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path"
 	"sort"
 	"strings"
@@ -16,7 +15,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/tarball"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
 const maxImageMetadataFileSize = 4 << 20
@@ -58,6 +57,7 @@ type ImageArchiveSummary struct {
 	WorkingDir     string                `json:"workingDir,omitempty"`
 	Environment    []string              `json:"environment,omitempty"`
 	ExposedPorts   []string              `json:"exposedPorts,omitempty"`
+	Volumes        []string              `json:"volumes,omitempty"`
 	Layers         []ImageLayerSummary   `json:"layers,omitempty"`
 	History        []ImageHistorySummary `json:"history,omitempty"`
 }
@@ -82,28 +82,79 @@ type ociDescriptor struct {
 // InspectImageArchive 顺序扫描 Docker save tar，只读取身份校验需要的小型
 // manifest、index 和 config。OCI 元数据存在时必须与 Docker 元数据一致。
 func InspectImageArchive(reader io.ReadSeeker) (*ImageArchiveSummary, error) {
-	rootFiles, err := readImageArchiveFiles(reader, "manifest.json", "index.json")
-	if err != nil {
-		return nil, err
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("mpk: rewind image archive: %w", err)
+	}
+	return InspectImageArchiveStream(reader)
+}
+
+// InspectImageArchiveStream 纯流式扫描 Docker save / OCI 镜像归档，不产生任何临时文件。
+// 仅提取 manifest.json、config.json 和 index.json 等关键元数据，
+// 并从 tar header 中提取镜像层大小，跳过层内容正文。
+func InspectImageArchiveStream(reader io.Reader) (*ImageArchiveSummary, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("mpk: image reader is required")
+	}
+	files := make(map[string][]byte)
+	layerSizes := make(map[string]int64)
+	seen := make(map[string]struct{})
+	tarReader := tar.NewReader(reader)
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			if err := consumeImageArchivePadding(reader); err != nil {
+				return nil, err
+			}
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("mpk: image archive is invalid: %w", err)
+		}
+		cleaned, err := safeImageArchivePath(header.Name)
+		if err != nil {
+			return nil, fmt.Errorf("mpk: image archive contains unsafe path %q", header.Name)
+		}
+		if _, duplicate := seen[cleaned]; duplicate {
+			return nil, fmt.Errorf("mpk: image archive contains duplicate file %q", cleaned)
+		}
+		seen[cleaned] = struct{}{}
+		switch header.Typeflag {
+		case tar.TypeDir:
+			continue
+		case tar.TypeReg, 0:
+		default:
+			return nil, fmt.Errorf("mpk: image archive contains unsupported node %q", header.Name)
+		}
+		layerSizes[cleaned] = header.Size
+		if isImageMetadataCandidate(cleaned, header.Size) {
+			content := make([]byte, header.Size)
+			if _, err := io.ReadFull(tarReader, content); err != nil {
+				return nil, fmt.Errorf("mpk: read image metadata %q: %w", cleaned, err)
+			}
+			files[cleaned] = content
+		} else {
+			if _, err := io.Copy(io.Discard, tarReader); err != nil {
+				return nil, fmt.Errorf("mpk: skip image archive member %q: %w", cleaned, err)
+			}
+		}
+	}
+	manifestData, exists := files["manifest.json"]
+	if !exists {
+		return nil, fmt.Errorf("mpk: image archive must contain one manifest, tag, and config")
 	}
 	var manifests []dockerSaveManifest
-	if err := json.Unmarshal(rootFiles["manifest.json"], &manifests); err != nil || len(manifests) != 1 || len(manifests[0].RepoTags) != 1 || manifests[0].Config == "" {
+	if err := json.Unmarshal(manifestData, &manifests); err != nil || len(manifests) != 1 || len(manifests[0].RepoTags) != 1 || manifests[0].Config == "" {
 		return nil, fmt.Errorf("mpk: image archive must contain one manifest, tag, and config")
 	}
 	dockerReference, err := parseExplicitImageTag(manifests[0].RepoTags[0])
 	if err != nil {
 		return nil, fmt.Errorf("mpk: docker manifest image reference is invalid: %w", err)
 	}
-
 	configName, err := safeImageArchivePath(manifests[0].Config)
 	if err != nil {
 		return nil, fmt.Errorf("mpk: image archive config path is unsafe")
 	}
-	configFiles, err := readImageArchiveFiles(reader, configName)
-	if err != nil {
-		return nil, err
-	}
-	configData, exists := configFiles[configName]
+	configData, exists := files[configName]
 	if !exists {
 		return nil, fmt.Errorf("mpk: image archive config %q is missing", configName)
 	}
@@ -111,74 +162,138 @@ func InspectImageArchive(reader io.ReadSeeker) (*ImageArchiveSummary, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mpk: image archive architecture is invalid")
 	}
-
-	if indexData, exists := rootFiles["index.json"]; exists {
-		if err := validateOCIImageMetadata(reader, indexData, dockerReference, dockerArchitecture); err != nil {
+	if indexData, exists := files["index.json"]; exists {
+		if err := validateOCIImageMetadataMemory(files, indexData, dockerReference, dockerArchitecture); err != nil {
 			return nil, err
 		}
 	}
-	return summarizeImageArchive(reader, dockerReference, manifests[0].RepoTags[0], dockerArchitecture, len(manifests[0].Layers))
+	return summarizeImageArchiveMemory(files, layerSizes, dockerReference, manifests[0].RepoTags[0], dockerArchitecture, manifests[0])
 }
 
-func summarizeImageArchive(reader io.ReadSeeker, reference name.Tag, repoTag, architecture string, expectedLayers int) (*ImageArchiveSummary, error) {
-	opener, cleanup, err := imageArchiveOpener(reader)
-	if err != nil {
-		return nil, err
+func consumeImageArchivePadding(reader io.Reader) error {
+	buffer := make([]byte, 32*1024)
+	for {
+		read, err := reader.Read(buffer)
+		for _, value := range buffer[:read] {
+			if value != 0 {
+				return fmt.Errorf("mpk: image archive has non-zero trailing data")
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("mpk: read image archive padding: %w", err)
+		}
 	}
-	defer cleanup()
-	image, err := tarball.Image(opener, &reference)
-	if err != nil {
-		return nil, fmt.Errorf("mpk: load image archive: %w", err)
+}
+
+func isImageMetadataCandidate(name string, size int64) bool {
+	if size < 0 || size > maxImageMetadataFileSize {
+		return false
 	}
-	config, err := image.ConfigFile()
+	if name == "manifest.json" || name == "index.json" || strings.HasSuffix(name, ".json") {
+		return true
+	}
+	base := path.Base(name)
+	if strings.HasPrefix(base, "sha256:") && len(base) == len("sha256:")+sha256.Size*2 {
+		_, err := hex.DecodeString(strings.TrimPrefix(base, "sha256:"))
+		return err == nil
+	}
+	if strings.HasPrefix(name, "blobs/sha256/") && !strings.HasSuffix(name, ".tar") && !strings.HasSuffix(name, ".tar.gz") {
+		return true
+	}
+	return false
+}
+
+func summarizeImageArchiveMemory(
+	files map[string][]byte,
+	layerSizes map[string]int64,
+	reference name.Tag,
+	repoTag, architecture string,
+	manifest dockerSaveManifest,
+) (*ImageArchiveSummary, error) {
+	configName, err := safeImageArchivePath(manifest.Config)
 	if err != nil {
+		return nil, fmt.Errorf("mpk: image archive config path is unsafe")
+	}
+	rawConfig, exists := files[configName]
+	if !exists {
+		return nil, fmt.Errorf("mpk: image archive config %q is missing", configName)
+	}
+	var config v1.ConfigFile
+	if err := json.Unmarshal(rawConfig, &config); err != nil {
 		return nil, fmt.Errorf("mpk: read image config: %w", err)
 	}
 	if config.Architecture != architecture {
 		return nil, fmt.Errorf("mpk: loaded image architecture %q does not match docker config architecture %q", config.Architecture, architecture)
 	}
-	rawConfig, err := image.RawConfigFile()
-	if err != nil {
-		return nil, fmt.Errorf("mpk: read raw image config: %w", err)
+	expectedLayers := len(manifest.Layers)
+	if len(config.RootFS.DiffIDs) != expectedLayers {
+		return nil, fmt.Errorf("mpk: docker manifest has %d layers but image config has %d diff IDs", expectedLayers, len(config.RootFS.DiffIDs))
 	}
-	imageDigest, err := image.Digest()
-	if err != nil {
-		return nil, fmt.Errorf("mpk: calculate image digest: %w", err)
-	}
-	configDigest, err := image.ConfigName()
+	configHashBytes := sha256.Sum256(rawConfig)
+	configDigest := "sha256:" + hex.EncodeToString(configHashBytes[:])
+	configHash, err := v1.NewHash(configDigest)
 	if err != nil {
 		return nil, fmt.Errorf("mpk: calculate image config digest: %w", err)
 	}
-	mediaType, err := image.MediaType()
-	if err != nil {
-		return nil, fmt.Errorf("mpk: read image media type: %w", err)
-	}
-	imageLayers, err := image.Layers()
-	if err != nil {
-		return nil, fmt.Errorf("mpk: read image layers: %w", err)
-	}
-	if len(imageLayers) != expectedLayers {
-		return nil, fmt.Errorf("mpk: docker manifest has %d layers but image config has %d diff IDs", expectedLayers, len(imageLayers))
-	}
-	layers := make([]ImageLayerSummary, 0, len(imageLayers))
+	descriptors := make([]v1.Descriptor, 0, expectedLayers)
+	layers := make([]ImageLayerSummary, 0, expectedLayers)
 	compressedSize := int64(len(rawConfig))
-	for index, layer := range imageLayers {
-		digest, digestErr := layer.Digest()
-		size, sizeErr := layer.Size()
-		layerMediaType, mediaTypeErr := layer.MediaType()
-		if err := errors.Join(digestErr, sizeErr, mediaTypeErr); err != nil {
-			return nil, fmt.Errorf("mpk: inspect image layer %d: %w", index, err)
+	for index, layerPath := range manifest.Layers {
+		cleaned, err := safeImageArchivePath(layerPath)
+		if err != nil {
+			return nil, fmt.Errorf("mpk: unsafe layer path: %w", err)
 		}
+		size, exists := layerSizes[cleaned]
+		if !exists {
+			return nil, fmt.Errorf("mpk: layer %q is missing from image archive", cleaned)
+		}
+		diffID := config.RootFS.DiffIDs[index]
+		mediaType := "application/vnd.docker.image.rootfs.diff.tar"
 		layers = append(layers, ImageLayerSummary{
-			Digest: digest.String(), CompressedSize: size, MediaType: string(layerMediaType),
+			Digest:         diffID.String(),
+			CompressedSize: size,
+			MediaType:      mediaType,
 		})
 		compressedSize += size
+		descriptors = append(descriptors, v1.Descriptor{
+			MediaType: types.DockerUncompressedLayer,
+			Size:      size,
+			Digest:    diffID,
+		})
 	}
+	dockerManifest := v1.Manifest{
+		SchemaVersion: 2,
+		MediaType:     types.DockerManifestSchema2,
+		Config: v1.Descriptor{
+			MediaType: types.DockerConfigJSON,
+			Size:      int64(len(rawConfig)),
+			Digest:    configHash,
+		},
+		Layers: descriptors,
+	}
+	manifestBytes, err := json.Marshal(dockerManifest)
+	if err != nil {
+		return nil, fmt.Errorf("mpk: marshal image manifest: %w", err)
+	}
+	manifestHash := sha256.Sum256(manifestBytes)
+	imageDigest := "sha256:" + hex.EncodeToString(manifestHash[:])
+
 	exposedPorts := make([]string, 0, len(config.Config.ExposedPorts))
 	for port := range config.Config.ExposedPorts {
 		exposedPorts = append(exposedPorts, port)
 	}
 	sort.Strings(exposedPorts)
+	volumes := make([]string, 0, len(config.Config.Volumes))
+	for volume := range config.Config.Volumes {
+		if volume == "" || !strings.HasPrefix(volume, "/") || path.Clean(volume) != volume || volume == "/" {
+			return nil, fmt.Errorf("mpk: image config volume target %q is invalid", volume)
+		}
+		volumes = append(volumes, volume)
+	}
+	sort.Strings(volumes)
 	history := make([]ImageHistorySummary, 0, len(config.History))
 	for _, item := range config.History {
 		history = append(history, ImageHistorySummary{
@@ -187,10 +302,10 @@ func summarizeImageArchive(reader io.ReadSeeker, reference name.Tag, repoTag, ar
 	}
 	return &ImageArchiveSummary{
 		RepoTag: repoTag, OS: config.OS, Architecture: architecture,
-		ImageDigest: imageDigest.String(), ConfigDigest: configDigest.String(), ConfigSize: int64(len(rawConfig)),
-		CompressedSize: compressedSize, MediaType: string(mediaType), Created: imageTime(config.Created),
+		ImageDigest: imageDigest, ConfigDigest: configDigest, ConfigSize: int64(len(rawConfig)),
+		CompressedSize: compressedSize, MediaType: string(types.DockerManifestSchema2), Created: imageTime(config.Created),
 		Entrypoint: config.Config.Entrypoint, Cmd: config.Config.Cmd, WorkingDir: config.Config.WorkingDir,
-		Environment: config.Config.Env, ExposedPorts: exposedPorts, Layers: layers, History: history,
+		Environment: config.Config.Env, ExposedPorts: exposedPorts, Volumes: volumes, Layers: layers, History: history,
 	}, nil
 }
 
@@ -201,42 +316,13 @@ func imageTime(value v1.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
-// imageArchiveOpener 为 go-containerregistry 的每次扫描提供独立 reader。
-// 文件和 bytes.Reader 直接复用 ReaderAt；不支持 ReaderAt 的少见 seeker 只落一次临时文件。
-func imageArchiveOpener(reader io.ReadSeeker) (tarball.Opener, func(), error) {
-	if readerAt, ok := reader.(io.ReaderAt); ok {
-		size, err := reader.Seek(0, io.SeekEnd)
-		if err != nil {
-			return nil, nil, fmt.Errorf("mpk: size image archive: %w", err)
-		}
-		return func() (io.ReadCloser, error) {
-			return io.NopCloser(io.NewSectionReader(readerAt, 0, size)), nil
-		}, func() {}, nil
-	}
-	temporary, err := os.CreateTemp("", "metis-image-reader-*.tar")
-	if err != nil {
-		return nil, nil, fmt.Errorf("mpk: create image reader file: %w", err)
-	}
-	name := temporary.Name()
-	cleanup := func() { _ = os.Remove(name) }
-	if _, err := reader.Seek(0, io.SeekStart); err != nil {
-		_ = temporary.Close()
-		cleanup()
-		return nil, nil, fmt.Errorf("mpk: rewind image archive: %w", err)
-	}
-	if _, err := io.Copy(temporary, reader); err != nil {
-		_ = temporary.Close()
-		cleanup()
-		return nil, nil, fmt.Errorf("mpk: copy image archive: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("mpk: close image reader file: %w", err)
-	}
-	return func() (io.ReadCloser, error) { return os.Open(name) }, cleanup, nil
+type ociIndex struct {
+	SchemaVersion int             `json:"schemaVersion"`
+	MediaType     string          `json:"mediaType"`
+	Manifests     []ociDescriptor `json:"manifests"`
 }
 
-func validateOCIImageMetadata(reader io.ReadSeeker, indexData []byte, dockerReference name.Tag, dockerArchitecture string) error {
+func validateOCIImageMetadataMemory(files map[string][]byte, indexData []byte, dockerReference name.Tag, dockerArchitecture string) error {
 	var index ociIndex
 	if err := json.Unmarshal(indexData, &index); err != nil || index.SchemaVersion != 2 || len(index.Manifests) != 1 {
 		return fmt.Errorf("mpk: oci index must contain one image manifest")
@@ -249,7 +335,7 @@ func validateOCIImageMetadata(reader io.ReadSeeker, indexData []byte, dockerRefe
 		return fmt.Errorf("mpk: oci index architecture %q does not match docker config architecture %q", descriptor.Platform.Architecture, dockerArchitecture)
 	}
 
-	manifestData, err := resolveOCIImageManifest(reader, descriptor, dockerArchitecture)
+	manifestData, err := resolveOCIImageManifestMemory(files, descriptor, dockerArchitecture)
 	if err != nil {
 		return err
 	}
@@ -265,11 +351,7 @@ func validateOCIImageMetadata(reader io.ReadSeeker, indexData []byte, dockerRefe
 	if err != nil {
 		return fmt.Errorf("mpk: oci config digest is invalid: %w", err)
 	}
-	configFiles, err := readImageArchiveFiles(reader, configName)
-	if err != nil {
-		return err
-	}
-	configData, exists := configFiles[configName]
+	configData, exists := files[configName]
 	if !exists {
 		return fmt.Errorf("mpk: oci config blob %q is missing", configName)
 	}
@@ -286,21 +368,12 @@ func validateOCIImageMetadata(reader io.ReadSeeker, indexData []byte, dockerRefe
 	return nil
 }
 
-type ociIndex struct {
-	SchemaVersion int             `json:"schemaVersion"`
-	MediaType     string          `json:"mediaType"`
-	Manifests     []ociDescriptor `json:"manifests"`
-}
-
-// resolveOCIImageManifest 兼容 OCI layout 的两种受控结构：顶层 descriptor
-// 可以直接指向 image manifest，也可以像 Docker 29 一样再指向一层多架构 index。
-// 子 index 只按 Docker config 已声明的 linux 架构唯一选取，不进行无界递归。
-func resolveOCIImageManifest(reader io.ReadSeeker, descriptor ociDescriptor, dockerArchitecture string) ([]byte, error) {
+func resolveOCIImageManifestMemory(files map[string][]byte, descriptor ociDescriptor, dockerArchitecture string) ([]byte, error) {
 	switch descriptor.MediaType {
 	case ociImageManifestMediaType:
-		return readVerifiedOCIBlob(reader, descriptor, "oci manifest")
+		return readVerifiedOCIBlobMemory(files, descriptor, "oci manifest")
 	case ociImageIndexMediaType:
-		indexData, err := readVerifiedOCIBlob(reader, descriptor, "oci nested index")
+		indexData, err := readVerifiedOCIBlobMemory(files, descriptor, "oci nested index")
 		if err != nil {
 			return nil, err
 		}
@@ -318,22 +391,18 @@ func resolveOCIImageManifest(reader io.ReadSeeker, descriptor ociDescriptor, doc
 		if len(matches) != 1 {
 			return nil, fmt.Errorf("mpk: nested oci index must contain exactly one linux/%s image manifest", dockerArchitecture)
 		}
-		return readVerifiedOCIBlob(reader, matches[0], "oci manifest")
+		return readVerifiedOCIBlobMemory(files, matches[0], "oci manifest")
 	default:
 		return nil, fmt.Errorf("mpk: oci index descriptor media type %q is unsupported", descriptor.MediaType)
 	}
 }
 
-func readVerifiedOCIBlob(reader io.ReadSeeker, descriptor ociDescriptor, description string) ([]byte, error) {
+func readVerifiedOCIBlobMemory(files map[string][]byte, descriptor ociDescriptor, description string) ([]byte, error) {
 	blobName, err := ociBlobPath(descriptor.Digest)
 	if err != nil {
 		return nil, fmt.Errorf("mpk: %s digest is invalid: %w", description, err)
 	}
-	blobFiles, err := readImageArchiveFiles(reader, blobName)
-	if err != nil {
-		return nil, err
-	}
-	blobData, exists := blobFiles[blobName]
+	blobData, exists := files[blobName]
 	if !exists {
 		return nil, fmt.Errorf("mpk: %s blob %q is missing", description, blobName)
 	}
@@ -418,59 +487,6 @@ func verifyOCIDescriptor(descriptor ociDescriptor, data []byte) error {
 		return fmt.Errorf("declared digest %q does not match content digest %q", descriptor.Digest, actual)
 	}
 	return nil
-}
-
-// readImageArchiveFiles 每次完整扫描所有 header，从而不依赖 tar 成员顺序，
-// 并在读取指定元数据的同时拒绝路径逃逸、链接和设备节点。
-func readImageArchiveFiles(reader io.ReadSeeker, names ...string) (map[string][]byte, error) {
-	if _, err := reader.Seek(0, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("mpk: rewind image archive: %w", err)
-	}
-	wanted := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		wanted[name] = struct{}{}
-	}
-	result := make(map[string][]byte, len(names))
-	seen := make(map[string]struct{})
-	tarReader := tar.NewReader(reader)
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			return result, nil
-		}
-		if err != nil {
-			return nil, fmt.Errorf("mpk: image archive is invalid: %w", err)
-		}
-		cleaned, err := safeImageArchivePath(header.Name)
-		if err != nil {
-			return nil, fmt.Errorf("mpk: image archive contains unsafe path %q", header.Name)
-		}
-		if _, duplicate := seen[cleaned]; duplicate {
-			return nil, fmt.Errorf("mpk: image archive contains duplicate file %q", cleaned)
-		}
-		seen[cleaned] = struct{}{}
-		switch header.Typeflag {
-		case tar.TypeDir:
-			continue
-		case tar.TypeReg, 0:
-		default:
-			return nil, fmt.Errorf("mpk: image archive contains unsupported node %q", header.Name)
-		}
-		if _, exists := wanted[cleaned]; !exists {
-			continue
-		}
-		if _, duplicate := result[cleaned]; duplicate {
-			return nil, fmt.Errorf("mpk: image archive contains duplicate file %q", cleaned)
-		}
-		if header.Size < 0 || header.Size > maxImageMetadataFileSize {
-			return nil, fmt.Errorf("mpk: image metadata %q exceeds %d bytes", cleaned, maxImageMetadataFileSize)
-		}
-		content := make([]byte, header.Size)
-		if _, err := io.ReadFull(tarReader, content); err != nil {
-			return nil, fmt.Errorf("mpk: read image metadata %q: %w", cleaned, err)
-		}
-		result[cleaned] = content
-	}
 }
 
 func safeImageArchivePath(value string) (string, error) {

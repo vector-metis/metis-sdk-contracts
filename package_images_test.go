@@ -16,7 +16,7 @@ func TestInspectPackageImagesStreamsAndValidatesAllArchitectures(t *testing.T) {
 	t.Parallel()
 
 	packageData := imagePackage(t, map[string][]byte{
-		"images/amd64/web.tar": dockerOCIArchive(t, "demo-a7x2m/web:1.0.0", "demo-a7x2m/web:1.0.0", contract.ArchAMD64, contract.ArchAMD64),
+		"images/amd64/web.tar": append(dockerOCIArchive(t, "demo-a7x2m/web:1.0.0", "demo-a7x2m/web:1.0.0", contract.ArchAMD64, contract.ArchAMD64), bytes.Repeat([]byte{0}, 8192)...),
 		"images/arm64/web.tar": dockerOCIArchive(t, "demo-a7x2m/web:1.0.0", "demo-a7x2m/web:1.0.0", contract.ArchARM64, contract.ArchARM64),
 	})
 	metadata := contract.PackageMetadata{
@@ -29,14 +29,7 @@ func TestInspectPackageImagesStreamsAndValidatesAllArchitectures(t *testing.T) {
 	visited := make([]string, 0, 2)
 	images, err := contract.InspectPackageImages(bytes.NewReader(packageData), metadata, func(archive contract.PackageImageArchive) (*contract.ImageArchiveSummary, error) {
 		visited = append(visited, archive.Path)
-		data, readErr := io.ReadAll(archive.Body)
-		if readErr != nil {
-			return nil, readErr
-		}
-		if int64(len(data)) != archive.Size {
-			t.Fatalf("archive %q size = %d, want %d", archive.Path, len(data), archive.Size)
-		}
-		return contract.InspectImageArchive(bytes.NewReader(data))
+		return contract.InspectImageArchiveStream(archive.Body)
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"regexp"
+	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -32,7 +34,7 @@ type GateError struct {
 	Err     error
 }
 
-// gateRuleError 在校验 seam 处携带明确规则，避免公开 CLI 和平台因错误文案变化而得到不同 RuleID。
+// gateRuleError 携带校验位置选定的规则编号，将规则与检查点放在一起，避免依赖错误消息的模糊匹配。
 type gateRuleError struct {
 	rule string
 	err  error
@@ -88,8 +90,8 @@ func gateError(err error) error {
 			rule = "MPK-COMPOSE-INTERPOLATION"
 		case strings.Contains(message, "platform label"):
 			rule = "MPK-COMPOSE-PLATFORM-LABEL"
-		case strings.Contains(message, "must declare restart") || strings.Contains(message, "oneshot and cannot declare restart"):
-			rule = "MPK-COMPOSE-RESTART"
+		case strings.Contains(message, "lifecycle") || strings.Contains(message, "x-metis") || strings.Contains(message, "restart"):
+			rule = "MPK-COMPOSE-LIFECYCLE"
 		case strings.Contains(message, "service sets differ") || strings.Contains(message, "undeclared service") || strings.Contains(message, "missing declared service"):
 			rule = "MPK-MANIFEST-SERVICE-MISMATCH"
 		case strings.Contains(message, "overlay"):
@@ -134,7 +136,7 @@ func gateFindingContext(message string) string {
 	return ""
 }
 
-// FindingsFromError converts an arbitrary validation error into the stable result shape.
+// FindingsFromError 将任意校验错误转换为稳定的门禁结果结构。
 func FindingsFromError(err error) []GateFinding {
 	if err == nil {
 		return nil
@@ -159,6 +161,8 @@ func (f GateFinding) Error() string {
 type GateOptions struct {
 	ValidateOptions
 	ImageVisitor func(PackageImageArchive) (*ImageArchiveSummary, error)
+	KnownSize    int64
+	KnownSHA256  string
 }
 
 // GateResult 是 MPK v1 门禁通过后的统一结果。Metadata 只包含有界契约快照，镜像正文不会进入
@@ -172,6 +176,17 @@ type GateResult struct {
 	SHA256         string
 }
 
+// ImageVolumeBinding 是镜像声明 volume 与 manifest mount 的稳定匹配事实。
+// Store、CLI 和平台审核页面都使用同一份结果，避免各消费方重复解析 Compose。
+type ImageVolumeBinding struct {
+	Architecture string `json:"architecture"`
+	Service      string `json:"service"`
+	Image        string `json:"image"`
+	Volume       string `json:"volume"`
+	Source       string `json:"source"`
+	Subpath      string `json:"subpath,omitempty"`
+}
+
 // GateMPK 顺序执行 v1 的完整硬门禁，并统一返回稳定的 GateFinding 错误。
 // 实现最多需要几次顺序扫描，但任何一次扫描都不会把完整 MPK 或镜像归档读入内存。
 func GateMPK(reader io.ReadSeeker, options GateOptions) (result *GateResult, err error) {
@@ -179,9 +194,14 @@ func GateMPK(reader io.ReadSeeker, options GateOptions) (result *GateResult, err
 	if reader == nil {
 		return nil, fmt.Errorf("mpk: package reader is required")
 	}
-	size, digest, err := hashPackage(reader)
-	if err != nil {
-		return nil, err
+	size := options.KnownSize
+	digest := options.KnownSHA256
+	if size <= 0 || digest == "" {
+		var hashErr error
+		size, digest, hashErr = hashPackage(reader)
+		if hashErr != nil {
+			return nil, hashErr
+		}
 	}
 	maxPackageSize := options.MaxPackageSize
 	if maxPackageSize <= 0 {
@@ -237,10 +257,77 @@ func GateMPK(reader io.ReadSeeker, options GateOptions) (result *GateResult, err
 	if err != nil {
 		return nil, err
 	}
+	if err := validateImageVolumeBindings(*metadata, result.Images, result.ImageSummaries); err != nil {
+		return nil, err
+	}
 	result.Assets, err = InspectPackageAssets(reader, manifest)
 	if err != nil {
 		return nil, err
 	}
+	return result, nil
+}
+
+// validateImageVolumeBindings 将镜像 Config.Volumes 与同一 service 的 manifest mount
+// 做显式 target 匹配，防止 Docker 在应用 scope 外创建匿名 volume。
+func validateImageVolumeBindings(metadata PackageMetadata, images []PackageImage, summaries map[string]*ImageArchiveSummary) error {
+	_, err := ImageVolumeBindings(metadata, images, summaries)
+	return err
+}
+
+// ImageVolumeBindings 校验并返回所有镜像 volume 的 manifest 绑定。
+func ImageVolumeBindings(metadata PackageMetadata, images []PackageImage, summaries map[string]*ImageArchiveSummary) ([]ImageVolumeBinding, error) {
+	byImage := make(map[string]*ImageArchiveSummary, len(images))
+	for _, image := range images {
+		if summary := summaries[image.Path]; summary != nil {
+			byImage[image.Architecture+"\x00"+image.Source] = summary
+		}
+	}
+	result := make([]ImageVolumeBinding, 0)
+	for architecture, compose := range metadata.Compose {
+		var document struct {
+			Services map[string]struct {
+				Image string `yaml:"image"`
+			} `yaml:"services"`
+		}
+		if err := yaml.Unmarshal([]byte(compose), &document); err != nil {
+			return nil, fmt.Errorf("mpk: compose.%s.yaml is invalid YAML: %w", architecture, err)
+		}
+		for serviceName, service := range document.Services {
+			summary := byImage[architecture+"\x00"+service.Image]
+			if summary == nil {
+				return nil, fmt.Errorf("mpk: compose.%s.yaml service %q image %q has no inspected summary", architecture, serviceName, service.Image)
+			}
+			declaration, exists := metadata.Manifest.Services[serviceName]
+			if !exists {
+				return nil, fmt.Errorf("mpk: compose.%s.yaml service %q is not declared in manifest", architecture, serviceName)
+			}
+			for _, volumeTarget := range summary.Volumes {
+				var matched *Mount
+				for index := range declaration.Mounts {
+					if declaration.Mounts[index].Target == volumeTarget {
+						matched = &declaration.Mounts[index]
+						break
+					}
+				}
+				if matched == nil {
+					return nil, withGateRule("MPK-VOLUME-UNMANAGED", fmt.Errorf("mpk: compose.%s.yaml service %q image declares volume %s, but manifest.services.%s.mounts has no matching target", architecture, serviceName, volumeTarget, serviceName))
+				}
+				if matched.Source == "overlay" || matched.ReadOnly {
+					return nil, withGateRule("MPK-MANIFEST-MOUNT", fmt.Errorf("mpk: compose.%s.yaml service %q image volume %s must use a writable non-overlay manifest mount", architecture, serviceName, volumeTarget))
+				}
+				result = append(result, ImageVolumeBinding{Architecture: architecture, Service: serviceName, Image: service.Image, Volume: volumeTarget, Source: matched.Source, Subpath: matched.Subpath})
+			}
+		}
+	}
+	sort.Slice(result, func(left, right int) bool {
+		if result[left].Architecture != result[right].Architecture {
+			return result[left].Architecture < result[right].Architecture
+		}
+		if result[left].Service != result[right].Service {
+			return result[left].Service < result[right].Service
+		}
+		return result[left].Volume < result[right].Volume
+	})
 	return result, nil
 }
 
@@ -258,26 +345,7 @@ func hashPackage(reader io.ReadSeeker) (int64, string, error) {
 }
 
 // validateImageArchive 是 CLI 和没有额外副作用的校验调用方使用的默认 visitor。
-// 镜像 tar 只落到临时文件，避免 100 GiB MPK 进入 Go 堆。
+// 纯流式解析元数据与镜像层大小，不产生任何临时文件，避免大镜像落盘。
 func validateImageArchive(archive PackageImageArchive) (*ImageArchiveSummary, error) {
-	temporary, err := os.CreateTemp("", "metis-gate-image-*.tar")
-	if err != nil {
-		return nil, fmt.Errorf("mpk: create image inspection file: %w", err)
-	}
-	name := temporary.Name()
-	defer os.Remove(name)
-	if _, err := io.Copy(temporary, archive.Body); err != nil {
-		_ = temporary.Close()
-		return nil, fmt.Errorf("mpk: receive image archive: %w", err)
-	}
-	if _, err := temporary.Seek(0, io.SeekStart); err != nil {
-		_ = temporary.Close()
-		return nil, fmt.Errorf("mpk: rewind image archive: %w", err)
-	}
-	summary, inspectErr := InspectImageArchive(temporary)
-	closeErr := temporary.Close()
-	if inspectErr != nil || closeErr != nil {
-		return nil, errors.Join(inspectErr, closeErr)
-	}
-	return summary, nil
+	return InspectImageArchiveStream(archive.Body)
 }

@@ -50,7 +50,7 @@ type InstallOptions struct {
 	ContractOnly bool
 }
 
-// InstallPlan 是平台执行前得到的只读安装计划，Compose 是应用 scope 下的部署副本。
+// InstallPlan 是平台执行前得到的只读安装计划，Compose 是展平后的部署副本。
 type InstallPlan struct {
 	Manifest    Manifest
 	Settings    []Setting
@@ -67,6 +67,7 @@ type InstallPackageSummary struct {
 
 var (
 	installPlaceholderPattern = regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`)
+	installPlaceholderName    = regexp.MustCompile(`^[A-Z0-9_]+$`)
 	slotPattern               = regexp.MustCompile(`^METIS_(LLM|EMBEDDING|RERANK)_(\d+)_(ENDPOINT|MODEL|API_KEY)$`)
 )
 
@@ -164,7 +165,7 @@ func planPreparedInstall(metadata PackageMetadata, options InstallOptions, requi
 	}
 	checks = append(checks,
 		"主入口恰好一个且只发布到 127.0.0.1",
-		"五个沙箱目录均使用完整目录占位符",
+		"managed mount root 与 subpath 已渲染为应用 scope 相对 source",
 		"配置、端口、能力和资源默认值已写入部署副本",
 	)
 	if options.ContractOnly && !requireImageMapping {
@@ -350,6 +351,15 @@ func installEnvironment(manifest Manifest, definitions []Setting, services map[s
 			placeholders[name] = struct{}{}
 		}
 	}
+	for _, service := range manifest.Services {
+		for _, source := range service.Environment {
+			if source.Value != nil {
+				for _, name := range installPlaceholders(*source.Value) {
+					placeholders[name] = struct{}{}
+				}
+			}
+		}
+	}
 	environment := map[string]string{
 		"METIS_APP_ID":      manifest.ID,
 		"METIS_APP_NAME":    manifest.DisplayName,
@@ -391,7 +401,10 @@ func installEnvironment(manifest Manifest, definitions []Setting, services map[s
 	for slotName, slot := range manifest.Models {
 		binding, exists := options.ModelBindings[slotName]
 		if !exists {
-			return nil, nil, fmt.Errorf("mpk: model slot %s is not bound", slotName)
+			if IsSlotRequired(slotName, slot) {
+				return nil, nil, fmt.Errorf("mpk: required model slot %s is not bound", slotName)
+			}
+			continue
 		}
 		parts := strings.SplitN(slotName, ".", 2)
 		if len(parts) != 2 {
@@ -419,7 +432,12 @@ func installEnvironment(manifest Manifest, definitions []Setting, services map[s
 		slot := modelType + "." + index
 		binding, exists := options.ModelBindings[slot]
 		if !exists {
-			return nil, nil, fmt.Errorf("mpk: model slot %s is not bound", slot)
+			slotDecl, hasSlot := manifest.Models[slot]
+			if !hasSlot || IsSlotRequired(slot, slotDecl) {
+				return nil, nil, fmt.Errorf("mpk: model slot %s is not bound", slot)
+			}
+			environment[name] = ""
+			continue
 		}
 		switch suffix {
 		case "ENDPOINT":
@@ -503,7 +521,10 @@ func assignApplicationPorts(
 func modelTraitSuffixes(modelType string) []string {
 	switch modelType {
 	case "llm":
-		return []string{"CONTEXT_WINDOW", "MAX_INPUT_TOKENS", "MAX_OUTPUT_TOKENS"}
+		return []string{
+			"CONTEXT_WINDOW", "MAX_INPUT_TOKENS", "MAX_OUTPUT_TOKENS",
+			"SUPPORTS_VISION", "SUPPORTS_THINKING", "SUPPORTS_TOOLS",
+		}
 	case "embedding":
 		return []string{"MAX_INPUT_TOKENS", "DIMENSIONS", "NORMALIZED"}
 	case "rerank":
@@ -553,6 +574,11 @@ func injectPlatformEnvironment(manifest Manifest, services map[string]map[string
 			values = make(map[string]any)
 		}
 		if declaration, exists := manifest.Services[serviceName]; exists {
+			if declaration.Lifecycle.Oneshot {
+				service["restart"] = "no"
+			} else {
+				service["restart"] = declaration.Lifecycle.Restart
+			}
 			for name, source := range declaration.Environment {
 				if source.Value != nil {
 					values[name] = expandManifestEnvironmentValue(*source.Value, environment)
@@ -565,13 +591,7 @@ func injectPlatformEnvironment(manifest Manifest, services map[string]map[string
 			if len(declaration.Mounts) > 0 {
 				mounts := make([]any, 0, len(declaration.Mounts))
 				for _, mount := range declaration.Mounts {
-					// 沙箱目录以裸目录名声明，overlay source 已经带有
-					// `./overlay` 前缀；统一在这里转换为 scope 相对路径，
-					// 避免生成不规范的 `././overlay/...`。
-					source := mount.Source
-					if !strings.HasPrefix(source, "./") {
-						source = "./" + source
-					}
+					source := "./" + managedMountPath(mount)
 					mounts = append(mounts, map[string]any{"type": "bind", "source": source, "target": mount.Target, "read_only": mount.ReadOnly, "bind": map[string]any{"create_host_path": false}})
 				}
 				service["volumes"] = mounts
@@ -592,7 +612,7 @@ func injectPlatformEnvironment(manifest Manifest, services map[string]map[string
 				for _, slotName := range request.Slots {
 					prefix := modelEnvironmentPrefix(slotName)
 					for name, value := range environment {
-						if strings.HasPrefix(name, prefix) {
+						if strings.HasPrefix(name, prefix) && strings.TrimSpace(value) != "" {
 							values[name] = value
 						}
 					}
@@ -641,9 +661,7 @@ func placeholdersInRawService(service map[string]any) []string {
 	visit = func(value any) {
 		switch item := value.(type) {
 		case string:
-			for _, match := range installPlaceholderPattern.FindAllStringSubmatch(item, -1) {
-				names = append(names, match[1])
-			}
+			names = append(names, installPlaceholders(item)...)
 		case []any:
 			for _, child := range item {
 				visit(child)
@@ -659,6 +677,38 @@ func placeholdersInRawService(service map[string]any) []string {
 		}
 	}
 	visit(service)
+	return names
+}
+
+// installPlaceholders 收集平台安装占位符，同时跳过 Compose 的 $$ 转义。
+// `$${NAME}` 必须原样留给容器内 shell；只有未转义的 `${NAME}` 才属于安装契约。
+func installPlaceholders(value string) []string {
+	names := make([]string, 0)
+	for index := 0; index < len(value); {
+		if value[index] != '$' {
+			index++
+			continue
+		}
+		if index+1 < len(value) && value[index+1] == '$' {
+			index += 2
+			continue
+		}
+		if index+1 >= len(value) || value[index+1] != '{' {
+			index++
+			continue
+		}
+		end := strings.IndexByte(value[index+2:], '}')
+		if end < 0 {
+			index += 2
+			continue
+		}
+		end += index + 2
+		name := value[index+2 : end]
+		if installPlaceholderName.MatchString(name) {
+			names = append(names, name)
+		}
+		index = end + 1
+	}
 	return names
 }
 

@@ -7,5 +7,6 @@ arch: [amd64]
 dependencies: [{id: core-a7x2m, alias: core, required: true, version: "^1.0.0"}]
 services:
   web:
+    lifecycle: {restart: unless-stopped, required: true}
     endpoints:
       - {name: web, protocol: http, container_port: 8080}

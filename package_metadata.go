@@ -97,7 +97,7 @@ func inspectPackageMetadata(reader io.Reader, expectedAppID, expectedVersion str
 	if err != nil {
 		return nil, fmt.Errorf("mpk: gzip format is invalid: %w", err)
 	}
-	files, present, fileCount, scanErr := scanPackageMetadataTar(gzipReader, maxPackageSize)
+	files, present, overlayPaths, overlayDirs, fileCount, scanErr := scanPackageMetadataTar(gzipReader, maxPackageSize)
 	if scanErr == nil {
 		_, scanErr = io.Copy(io.Discard, gzipReader)
 	}
@@ -137,7 +137,7 @@ func inspectPackageMetadata(reader io.Reader, expectedAppID, expectedVersion str
 	if err := validateScreenshots(manifest.Screenshots, files); err != nil {
 		return nil, err
 	}
-	if err := validateCompose(manifest, files, true); err != nil {
+	if err := validateCompose(manifest, files, overlayPaths, overlayDirs, true); err != nil {
 		return nil, err
 	}
 	if about := files["about.md"]; !utf8.Valid(about) {
@@ -156,10 +156,12 @@ func inspectPackageMetadata(reader io.Reader, expectedAppID, expectedVersion str
 	}, nil
 }
 
-func scanPackageMetadataTar(reader io.Reader, maxPackageSize int64) (map[string][]byte, map[string]struct{}, int, error) {
+func scanPackageMetadataTar(reader io.Reader, maxPackageSize int64) (map[string][]byte, map[string]struct{}, map[string]struct{}, map[string]struct{}, int, error) {
 	tarReader := tar.NewReader(reader)
 	files := make(map[string][]byte)
 	present := make(map[string]struct{})
+	overlayPaths := make(map[string]struct{})
+	overlayDirs := make(map[string]struct{})
 	fileCount := 0
 	entryCount := 0
 	var expanded int64
@@ -173,63 +175,61 @@ func scanPackageMetadataTar(reader io.Reader, maxPackageSize int64) (map[string]
 			break
 		}
 		if err != nil {
-			return nil, nil, 0, fmt.Errorf("mpk: tar format is invalid: %w", err)
+			return nil, nil, nil, nil, 0, fmt.Errorf("mpk: tar format is invalid: %w", err)
 		}
 		entryCount++
 		if entryCount > maxPackageEntries {
-			return nil, nil, 0, fmt.Errorf("mpk: package exceeds %d entries", maxPackageEntries)
+			return nil, nil, nil, nil, 0, fmt.Errorf("mpk: package exceeds %d entries", maxPackageEntries)
 		}
 		name := path.Clean(header.Name)
 		if header.Name == "" || len(header.Name) > maxPackagePathSize || name == "." ||
 			path.IsAbs(header.Name) || strings.HasPrefix(name, "../") || name == ".." {
-			return nil, nil, 0, fmt.Errorf("mpk: unsafe path %q", header.Name)
+			return nil, nil, nil, nil, 0, fmt.Errorf("mpk: unsafe path %q", header.Name)
 		}
 		if _, duplicate := present[name]; duplicate {
-			return nil, nil, 0, fmt.Errorf("mpk: duplicate entry %q", name)
+			return nil, nil, nil, nil, 0, fmt.Errorf("mpk: duplicate entry %q", name)
 		}
 		present[name] = struct{}{}
 		switch header.Typeflag {
 		case tar.TypeDir:
-			// 保留 overlay 的目录条目，才能验证空目录或整棵 overlay 根目录挂载。
 			if name == "overlay" || strings.HasPrefix(name, "overlay/") {
-				files[name] = nil
+				overlayDirs[name] = struct{}{}
 			}
 			continue
 		case tar.TypeReg:
 			if header.Size < 0 || header.Size > maxPackageSize || expanded > expandedLimit-header.Size {
-				return nil, nil, 0, fmt.Errorf("mpk: expanded package size exceeds %d bytes", expandedLimit)
+				return nil, nil, nil, nil, 0, fmt.Errorf("mpk: expanded package size exceeds %d bytes", expandedLimit)
 			}
 			expanded += header.Size
 		case tar.TypeSymlink, tar.TypeLink, tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
-			return nil, nil, 0, fmt.Errorf("mpk: forbidden non-regular node %q", name)
+			return nil, nil, nil, nil, 0, fmt.Errorf("mpk: forbidden non-regular node %q", name)
 		default:
-			return nil, nil, 0, fmt.Errorf("mpk: unsupported tar node %q", name)
+			return nil, nil, nil, nil, 0, fmt.Errorf("mpk: unsupported tar node %q", name)
 		}
 		fileCount++
-		// 记录 overlay 成员名称但不读取正文，供 manifest 挂载存在性校验使用。
-		if name == "overlay" || strings.HasPrefix(name, "overlay/") {
-			files[name] = nil
+		if strings.HasPrefix(name, "overlay/") {
+			overlayPaths[name] = struct{}{}
 		}
 		limit := metadataFileLimit(name)
 		if limit == 0 {
 			if _, err := io.Copy(io.Discard, tarReader); err != nil {
-				return nil, nil, 0, fmt.Errorf("mpk: cannot scan %q: %w", name, err)
+				return nil, nil, nil, nil, 0, fmt.Errorf("mpk: cannot scan %q: %w", name, err)
 			}
 			continue
 		}
 		content, err := io.ReadAll(io.LimitReader(tarReader, limit+1))
 		if err != nil {
-			return nil, nil, 0, fmt.Errorf("mpk: cannot read %q: %w", name, err)
+			return nil, nil, nil, nil, 0, fmt.Errorf("mpk: cannot read %q: %w", name, err)
 		}
 		if int64(len(content)) > limit {
-			return nil, nil, 0, fmt.Errorf("mpk: metadata file %q exceeds %d bytes", name, limit)
+			return nil, nil, nil, nil, 0, fmt.Errorf("mpk: metadata file %q exceeds %d bytes", name, limit)
 		}
 		files[name] = content
 	}
 	if fileCount == 0 {
-		return nil, nil, 0, fmt.Errorf("mpk: package is empty")
+		return nil, nil, nil, nil, 0, fmt.Errorf("mpk: package is empty")
 	}
-	return files, present, fileCount, nil
+	return files, present, overlayPaths, overlayDirs, fileCount, nil
 }
 
 func metadataFileLimit(name string) int64 {

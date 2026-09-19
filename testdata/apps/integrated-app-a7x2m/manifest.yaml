@@ -16,6 +16,7 @@ models:
     interface: openai.chat.completions
 services:
   web:
+    lifecycle: {restart: unless-stopped, required: true}
     endpoints:
       - {name: web, protocol: http, container_port: 8080}
     mounts:

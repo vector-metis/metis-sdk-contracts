@@ -1,0 +1,20 @@
+schema_version: 1
+id: llm-chat-a7x2m
+version: 1.0.3
+display_name: 模型对话
+type: web
+description: 使用平台统一模型网关的最小流式聊天示例
+arch: [amd64, arm64]
+dependencies: []
+models:
+  llm.0:
+    interface: openai.chat.completions
+  llm.1:
+    interface: openai.chat.completions
+services:
+  web:
+    lifecycle: {restart: unless-stopped, required: true}
+    endpoints:
+      - {name: chat, protocol: http, container_port: 8080}
+    capabilities:
+      model-gateway: {slots: [llm.0, llm.1]}

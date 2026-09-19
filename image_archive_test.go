@@ -41,6 +41,113 @@ func TestInspectImageArchiveReadsManifestReferencedConfig(t *testing.T) {
 	}
 }
 
+func TestInspectImageArchiveReadsDigestNamedDockerConfig(t *testing.T) {
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	layer := strings.Repeat("x", 1024)
+	layerDigest := sha256.Sum256([]byte(layer))
+	config := fmt.Sprintf(`{"architecture":"amd64","rootfs":{"type":"layers","diff_ids":["sha256:%s"]}}`, hex.EncodeToString(layerDigest[:]))
+	configDigest := sha256.Sum256([]byte(config))
+	configName := "sha256:" + hex.EncodeToString(configDigest[:])
+	writeTarEntry(t, writer, configName, config)
+	writeTarEntry(t, writer, "layer.tar", layer)
+	writeTarEntry(t, writer, "manifest.json", fmt.Sprintf(`[{"Config":%q,"RepoTags":["demo-a7x2m/web:1.0.0"],"Layers":["layer.tar"]}]`, configName))
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := contract.InspectImageArchive(bytes.NewReader(archive.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.ConfigDigest != "sha256:"+hex.EncodeToString(configDigest[:]) {
+		t.Fatalf("config digest = %q", summary.ConfigDigest)
+	}
+}
+
+func TestInspectImageArchiveStreamMultiLayer(t *testing.T) {
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+
+	layer1 := strings.Repeat("a", 2048)
+	layer2 := strings.Repeat("b", 4096)
+	layer3 := strings.Repeat("c", 8192)
+	h1 := sha256.Sum256([]byte(layer1))
+	h2 := sha256.Sum256([]byte(layer2))
+	h3 := sha256.Sum256([]byte(layer3))
+	digest1 := "sha256:" + hex.EncodeToString(h1[:])
+	digest2 := "sha256:" + hex.EncodeToString(h2[:])
+	digest3 := "sha256:" + hex.EncodeToString(h3[:])
+
+	writeTarEntry(t, writer, "layer1.tar", layer1)
+	writeTarEntry(t, writer, "layer2.tar", layer2)
+	writeTarEntry(t, writer, "layer3.tar", layer3)
+	configJSON := fmt.Sprintf(`{
+		"architecture":"amd64",
+		"os":"linux",
+		"rootfs":{"type":"layers","diff_ids":[%q,%q,%q]},
+		"config":{"Env":["NODE_ENV=production","PORT=3000"],"ExposedPorts":{"3000/tcp":{}},"Entrypoint":["node","server.js"]},
+		"history":[{"created":"2026-09-16T22:00:00Z","created_by":"RUN echo hello"}]
+	}`, digest1, digest2, digest3)
+	writeTarEntry(t, writer, "config.json", configJSON)
+	writeTarEntry(t, writer, "manifest.json", `[{"Config":"config.json","RepoTags":["my-app:2.0.0"],"Layers":["layer1.tar","layer2.tar","layer3.tar"]}]`)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 纯流式读取，不包装 Seek
+	stream := bytes.NewBuffer(archive.Bytes())
+	summary, err := contract.InspectImageArchiveStream(stream)
+	if err != nil {
+		t.Fatalf("InspectImageArchiveStream() error = %v", err)
+	}
+
+	if summary.RepoTag != "my-app:2.0.0" || summary.Architecture != contract.ArchAMD64 || summary.OS != "linux" {
+		t.Fatalf("unexpected summary identity: %#v", summary)
+	}
+	if len(summary.Layers) != 3 {
+		t.Fatalf("expected 3 layers, got %d", len(summary.Layers))
+	}
+	if summary.Layers[0].Digest != digest1 || summary.Layers[0].CompressedSize != 2048 {
+		t.Fatalf("layer 0 mismatch: %#v", summary.Layers[0])
+	}
+	if summary.Layers[1].Digest != digest2 || summary.Layers[1].CompressedSize != 4096 {
+		t.Fatalf("layer 1 mismatch: %#v", summary.Layers[1])
+	}
+	if summary.Layers[2].Digest != digest3 || summary.Layers[2].CompressedSize != 8192 {
+		t.Fatalf("layer 2 mismatch: %#v", summary.Layers[2])
+	}
+	expectedCompressedSize := int64(len(configJSON)) + 2048 + 4096 + 8192
+	if summary.CompressedSize != expectedCompressedSize {
+		t.Fatalf("compressedSize = %d, want %d", summary.CompressedSize, expectedCompressedSize)
+	}
+	if !slices.Equal(summary.Entrypoint, []string{"node", "server.js"}) {
+		t.Fatalf("entrypoint = %#v", summary.Entrypoint)
+	}
+	if len(summary.History) != 1 || summary.History[0].CreatedBy != "RUN echo hello" {
+		t.Fatalf("history = %#v", summary.History)
+	}
+}
+
+func TestInspectImageArchiveStreamAcceptsExtraZeroPadding(t *testing.T) {
+	archive := dockerOCIArchive(t, "demo-a7x2m/web:1.0.0", "demo-a7x2m/web:1.0.0", contract.ArchAMD64, contract.ArchAMD64)
+	archive = append(archive, bytes.Repeat([]byte{0}, 8192)...)
+
+	if _, err := contract.InspectImageArchiveStream(bytes.NewReader(archive)); err != nil {
+		t.Fatalf("InspectImageArchiveStream() error = %v, want extra zero padding to be accepted", err)
+	}
+}
+
+func TestInspectImageArchiveStreamRejectsNonZeroTrailingData(t *testing.T) {
+	archive := dockerOCIArchive(t, "demo-a7x2m/web:1.0.0", "demo-a7x2m/web:1.0.0", contract.ArchAMD64, contract.ArchAMD64)
+	archive = append(archive, 0, 1)
+
+	_, err := contract.InspectImageArchiveStream(bytes.NewReader(archive))
+	if err == nil || !strings.Contains(err.Error(), "non-zero trailing data") {
+		t.Fatalf("InspectImageArchiveStream() error = %v, want non-zero trailing data rejection", err)
+	}
+}
+
 func TestInspectImageArchiveRejectsMissingConfig(t *testing.T) {
 	var archive bytes.Buffer
 	writer := tar.NewWriter(&archive)

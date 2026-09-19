@@ -9,15 +9,20 @@ import (
 	"path"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // DeploymentPackage 是 Master 交给 Worker 的最小运行时副本，不包含 MPK 或镜像归档。
 type DeploymentPackage struct {
-	Compose      []byte
-	Environment  map[string]string
-	Overlay      map[string][]byte
-	Package      io.ReadSeeker
-	Architecture string
+	Compose     []byte
+	Environment map[string]string
+	Overlay     map[string][]byte
+	// ManagedDirectories 是 Master 根据最终 Compose 计算出的运行时目录；
+	// 目录条目会随部署包下发，但不会携带应用数据文件。
+	ManagedDirectories []string
+	Package            io.ReadSeeker
+	Architecture       string
 }
 
 // WriteDeploymentPackage 流式写出可直接解压到应用隔离目录的 tar.gz。
@@ -32,9 +37,16 @@ func WriteDeploymentPackage(output io.Writer, deployment DeploymentPackage) (res
 	}()
 
 	for _, directory := range []string{"program/", "config/", "data/", "log/", "tmp/", "overlay/"} {
-		if err := tarWriter.WriteHeader(&tar.Header{Name: directory, Typeflag: tar.TypeDir, Mode: 0o750}); err != nil {
+		mode := int64(0o750)
+		if directory == "config/" || directory == "data/" || directory == "log/" || directory == "tmp/" {
+			mode = 0o777
+		}
+		if err := tarWriter.WriteHeader(&tar.Header{Name: directory, Typeflag: tar.TypeDir, Mode: mode}); err != nil {
 			return fmt.Errorf("deployment: write directory %q: %w", directory, err)
 		}
+	}
+	if err := writeManagedDirectories(tarWriter, deployment.ManagedDirectories); err != nil {
+		return err
 	}
 	if err := writeDeploymentProgram(tarWriter, deployment.Package, deployment.Architecture); err != nil {
 		return err
@@ -96,6 +108,111 @@ func WriteDeploymentPackage(output io.Writer, deployment DeploymentPackage) (res
 		}
 	}
 	return nil
+}
+
+func writeManagedDirectories(writer *tar.Writer, directories []string) error {
+	seen := map[string]struct{}{
+		"config": {},
+		"data":   {},
+		"log":    {},
+		"tmp":    {},
+	}
+	for _, directory := range directories {
+		cleaned := path.Clean(strings.TrimSuffix(directory, "/"))
+		if !isRuntimeDirectoryPath(cleaned) {
+			return fmt.Errorf("deployment: unsafe managed directory %q", directory)
+		}
+		pending := make([]string, 0, strings.Count(cleaned, "/"))
+		for current := cleaned; current != "."; current = path.Dir(current) {
+			if _, exists := seen[current]; exists {
+				break
+			}
+			pending = append(pending, current)
+			if path.Dir(current) == current {
+				break
+			}
+		}
+		for index := len(pending) - 1; index >= 0; index-- {
+			current := pending[index]
+			seen[current] = struct{}{}
+			if err := writer.WriteHeader(&tar.Header{Name: current + "/", Typeflag: tar.TypeDir, Mode: 0o777}); err != nil {
+				return fmt.Errorf("deployment: write managed directory %q: %w", current, err)
+			}
+		}
+	}
+	return nil
+}
+
+func isRuntimeDirectoryPath(value string) bool {
+	parts := strings.Split(value, "/")
+	if len(parts) < 2 || parts[0] == "" {
+		return false
+	}
+	switch parts[0] {
+	case "config", "data", "log", "tmp":
+	default:
+		return false
+	}
+	if path.IsAbs(value) || value == "." || value == ".." || path.Clean(value) != value {
+		return false
+	}
+	for _, part := range parts[1:] {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// ManagedDirectoriesFromCompose 从 Master 生成的最终 Compose 中提取需要预创建的
+// config/data/log/tmp 嵌套目录。最终 Compose 只允许使用 scope 相对 bind source，
+// 因此这里不接受宿主绝对路径或 scope 外路径；顶层目录由部署包固定写入。
+func ManagedDirectoriesFromCompose(compose []byte) ([]string, error) {
+	var document struct {
+		Services map[string]struct {
+			Volumes []struct {
+				Type   string `yaml:"type"`
+				Source string `yaml:"source"`
+			} `yaml:"volumes"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(compose, &document); err != nil {
+		return nil, fmt.Errorf("deployment: decode compose: %w", err)
+	}
+	seen := make(map[string]struct{})
+	for _, service := range document.Services {
+		for _, volume := range service.Volumes {
+			if volume.Type != "bind" {
+				continue
+			}
+			source := strings.TrimSpace(volume.Source)
+			if !strings.HasPrefix(source, "./") {
+				continue
+			}
+			source = strings.TrimPrefix(source, "./")
+			root := strings.SplitN(source, "/", 2)[0]
+			switch root {
+			case "overlay", "program":
+				continue
+			case "config", "data", "log", "tmp":
+				if source == root {
+					continue
+				}
+			default:
+				return nil, fmt.Errorf("deployment: invalid runtime bind source %q", volume.Source)
+			}
+			if !isRuntimeDirectoryPath(source) {
+				return nil, fmt.Errorf("deployment: invalid runtime bind source %q", volume.Source)
+			}
+			seen[source] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for source := range seen {
+		result = append(result, source)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 // writeDeploymentProgram 从 ready MPK 中顺序复制目标架构的可选程序文件。

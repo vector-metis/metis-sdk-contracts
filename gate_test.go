@@ -95,27 +95,47 @@ func TestGateMPKContractOnlySkipsImageBody(t *testing.T) {
 	}
 }
 
-// TestGateMPKEnforcesCanonicalOverlaySources 固化公开 contracts 与平台相同的 overlay 路径规则。
-func TestGateMPKEnforcesCanonicalOverlaySources(t *testing.T) {
+func TestGateMPKClassifiesManifestSemanticErrors(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name   string
-		source string
+		mutate func(map[string][]byte)
 		want   string
 	}{
-		{name: "legacy source", source: "./config.yaml", want: "MPK-MANIFEST-MOUNT"},
-		{name: "parent escape", source: "./overlay/../config.yaml", want: "MPK-MANIFEST-MOUNT"},
-		{name: "double slash", source: "./overlay//config.yaml", want: "MPK-MANIFEST-MOUNT"},
-		{name: "current segment", source: "./overlay/./config.yaml", want: "MPK-MANIFEST-MOUNT"},
-		{name: "missing file", source: "./overlay/missing.conf", want: "MPK-MANIFEST-OVERLAY"},
+		{
+			name: "endpoint protocol",
+			mutate: func(files map[string][]byte) {
+				files["manifest.yaml"] = bytes.Replace(files["manifest.yaml"], []byte("protocol: http"), []byte("protocol: tcp"), 1)
+			},
+			want: "MPK-MANIFEST-ENDPOINT",
+		},
+		{
+			name: "reserved mount target",
+			mutate: func(files map[string][]byte) {
+				files["manifest.yaml"] = append(files["manifest.yaml"], []byte("    mounts:\n      - {source: data, target: /proc}\n")...)
+			},
+			want: "MPK-MANIFEST-MOUNT",
+		},
+		{
+			name: "missing overlay file",
+			mutate: func(files map[string][]byte) {
+				files["manifest.yaml"] = append(files["manifest.yaml"], []byte("    mounts:\n      - {source: overlay, subpath: missing.conf, target: /etc/app.conf, read_only: true}\n")...)
+			},
+			want: "MPK-MANIFEST-OVERLAY",
+		},
+		{
+			name: "legacy overlay source",
+			mutate: func(files map[string][]byte) {
+				files["manifest.yaml"] = append(files["manifest.yaml"], []byte("    mounts:\n      - {source: ./missing.conf, target: /etc/app.conf, read_only: true}\n")...)
+			},
+			want: "MPK-MANIFEST-MOUNT",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := contract.GateMPK(bytes.NewReader(buildMPK(t, func(files map[string][]byte) {
-				files["manifest.yaml"] = append(files["manifest.yaml"], []byte("    mounts:\n      - {source: "+test.source+", target: /etc/app.conf, read_only: true}\n")...)
-			})), contract.GateOptions{})
+			_, err := contract.GateMPK(bytes.NewReader(buildMPK(t, test.mutate)), contract.GateOptions{})
 			if err == nil {
-				t.Fatal("GateMPK() = nil, want overlay source rejection")
+				t.Fatal("GateMPK() = nil, want semantic rejection")
 			}
 			findings := contract.FindingsFromError(err)
 			if len(findings) != 1 || findings[0].RuleID != test.want {
@@ -125,26 +145,49 @@ func TestGateMPKEnforcesCanonicalOverlaySources(t *testing.T) {
 	}
 }
 
-// TestGateMPKAcceptsOverlayRootMount 固化整棵 overlay 目录和其中的文件可以作为挂载源。
-func TestGateMPKAcceptsOverlayRootMount(t *testing.T) {
+func TestGateMPKAcceptsOverlayFile(t *testing.T) {
 	t.Parallel()
 	data := buildMPK(t, func(files map[string][]byte) {
-		files["manifest.yaml"] = append(files["manifest.yaml"], []byte("    mounts:\n      - {source: ./overlay, target: /etc/app, read_only: true}\n")...)
-		files["overlay/app.conf"] = []byte("enabled=true\n")
+		files["manifest.yaml"] = append(files["manifest.yaml"], []byte("    mounts:\n      - {source: overlay, subpath: conf/app.conf, target: /etc/app.conf, read_only: true}\n")...)
+		files["overlay/conf/app.conf"] = []byte("enabled=true\n")
 	})
 	if _, err := contract.GateMPK(bytes.NewReader(data), contract.GateOptions{}); err != nil {
-		t.Fatalf("GateMPK() error = %v, want overlay root mount accepted", err)
+		t.Fatalf("GateMPK() error = %v", err)
 	}
 }
 
-// TestGateMPKRejectsRemovedDirectoryPlaceholders 防止旧宿主目录变量从公开 contracts 回流到容器。
-func TestGateMPKRejectsRemovedDirectoryPlaceholders(t *testing.T) {
+func TestGateMPKRequiresWritableManifestBindingForImageVolume(t *testing.T) {
 	t.Parallel()
-	data := buildMPK(t, func(files map[string][]byte) {
-		files["manifest.yaml"] = append(files["manifest.yaml"], []byte("    environment:\n      APP_CONFIG: {value: \"${METIS_DIR_CONFIG}/app.yaml\"}\n")...)
+	withoutBinding := buildMPK(t, func(files map[string][]byte) {
+		files["images/amd64/app.tar"] = dockerArchiveWithVolume(t, contract.ArchAMD64, "demo-a7x2m/web:1.0.0", "/var/lib/app")
 	})
-	_, err := contract.GateMPK(bytes.NewReader(data), contract.GateOptions{})
-	if err == nil || !strings.Contains(err.Error(), "removed directory placeholder") {
-		t.Fatalf("GateMPK() error = %v, want removed directory placeholder rejection", err)
+	_, err := contract.GateMPK(bytes.NewReader(withoutBinding), contract.GateOptions{})
+	if err == nil || contract.FindingsFromError(err)[0].RuleID != "MPK-VOLUME-UNMANAGED" {
+		t.Fatalf("unbound image volume error = %v, want MPK-VOLUME-UNMANAGED", err)
+	}
+
+	withBinding := buildMPK(t, func(files map[string][]byte) {
+		files["manifest.yaml"] = append(files["manifest.yaml"], []byte("    mounts:\n      - {source: data, subpath: app, target: /var/lib/app}\n")...)
+		files["images/amd64/app.tar"] = dockerArchiveWithVolume(t, contract.ArchAMD64, "demo-a7x2m/web:1.0.0", "/var/lib/app")
+	})
+	result, err := contract.GateMPK(bytes.NewReader(withBinding), contract.GateOptions{})
+	if err != nil {
+		t.Fatalf("writable image volume binding error = %v", err)
+	}
+	if got := result.ImageSummaries["images/amd64/app.tar"].Volumes; len(got) != 1 || got[0] != "/var/lib/app" {
+		t.Fatalf("image volume summary = %#v", got)
+	}
+	bindings, err := contract.ImageVolumeBindings(result.Metadata, result.Images, result.ImageSummaries)
+	if err != nil || len(bindings) != 1 || bindings[0].Source != "data" || bindings[0].Subpath != "app" {
+		t.Fatalf("image volume binding facts = %#v, err=%v", bindings, err)
+	}
+
+	readOnlyBinding := buildMPK(t, func(files map[string][]byte) {
+		files["manifest.yaml"] = append(files["manifest.yaml"], []byte("    mounts:\n      - {source: data, target: /var/lib/app, read_only: true}\n")...)
+		files["images/amd64/app.tar"] = dockerArchiveWithVolume(t, contract.ArchAMD64, "demo-a7x2m/web:1.0.0", "/var/lib/app")
+	})
+	_, err = contract.GateMPK(bytes.NewReader(readOnlyBinding), contract.GateOptions{})
+	if err == nil || contract.FindingsFromError(err)[0].RuleID != "MPK-MANIFEST-MOUNT" {
+		t.Fatalf("read-only image volume error = %v, want MPK-MANIFEST-MOUNT", err)
 	}
 }

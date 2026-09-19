@@ -3,6 +3,8 @@ package contract_test
 import (
 	"bytes"
 	"fmt"
+	"image"
+	"image/png"
 	"testing"
 
 	contract "github.com/vector-metis/metis-sdk-contracts"
@@ -58,6 +60,16 @@ func TestGateMPKRejectsInvalidAssets(t *testing.T) {
 			name: "fake png icon",
 			mutate: func(files map[string][]byte) {
 				files["icons/icon-64.png"] = []byte("not a png")
+			},
+		},
+		{
+			name: "icon without alpha",
+			mutate: func(files map[string][]byte) {
+				var output bytes.Buffer
+				if err := png.Encode(&output, image.NewGray(image.Rect(0, 0, 64, 64))); err != nil {
+					t.Fatal(err)
+				}
+				files["icons/icon-64.png"] = output.Bytes()
 			},
 		},
 		{

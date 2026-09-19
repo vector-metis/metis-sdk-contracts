@@ -13,13 +13,13 @@ func TestTargetImageReferenceUsesRepositoryBasename(t *testing.T) {
 		source   string
 		expected string
 	}{
-		{name: "application image", source: "qa-market-1-wpsjl/web:1.0.0", expected: "platform.example.invalid/qa-market-1-wpsjl/web:1.0.0"},
-		{name: "docker hub image", source: "docker.io/library/postgres:16", expected: "platform.example.invalid/qa-market-1-wpsjl/postgres:16"},
-		{name: "source registry with port", source: "source.internal:5000/team/api:v2", expected: "platform.example.invalid/qa-market-1-wpsjl/api:v2"},
+		{name: "application image", source: "qa-market-1-wpsjl/web:1.0.0", expected: "metis.internal/qa-market-1-wpsjl/web:1.0.0"},
+		{name: "docker hub image", source: "docker.io/library/postgres:16", expected: "metis.internal/qa-market-1-wpsjl/postgres:16"},
+		{name: "source registry with port", source: "source.internal:5000/team/api:v2", expected: "metis.internal/qa-market-1-wpsjl/api:v2"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			target, err := contract.TargetImageReference("platform.example.invalid", "qa-market-1-wpsjl", test.source)
+			target, err := contract.TargetImageReference("metis.internal", "qa-market-1-wpsjl", test.source)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -37,10 +37,10 @@ func TestTargetImageReferenceRejectsInvalidInput(t *testing.T) {
 		appID  string
 		source string
 	}{
-		{name: "host contains scheme", host: "http://platform.example.invalid", appID: "demo-a7x2m", source: "demo/web:1.0.0"},
-		{name: "unsafe application id", host: "platform.example.invalid", appID: "../demo", source: "demo/web:1.0.0"},
-		{name: "source lacks tag", host: "platform.example.invalid", appID: "demo-a7x2m", source: "demo/web"},
-		{name: "source uses digest", host: "platform.example.invalid", appID: "demo-a7x2m", source: "demo/web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{name: "host contains scheme", host: "http://metis.internal", appID: "demo-a7x2m", source: "demo/web:1.0.0"},
+		{name: "unsafe application id", host: "metis.internal", appID: "../demo", source: "demo/web:1.0.0"},
+		{name: "source lacks tag", host: "metis.internal", appID: "demo-a7x2m", source: "demo/web"},
+		{name: "source uses digest", host: "metis.internal", appID: "demo-a7x2m", source: "demo/web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -80,7 +80,7 @@ func TestDecideImageImport(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			decision, err := contract.DecideImageImport(
-				"platform.example.invalid/demo-a7x2m/web:1.0.0",
+				"metis.internal/demo-a7x2m/web:1.0.0",
 				test.existingDigest,
 				test.incomingDigest,
 			)

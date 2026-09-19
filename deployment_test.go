@@ -23,7 +23,7 @@ func TestWriteDeploymentPackageContainsOnlyRuntimeFiles(t *testing.T) {
 	})
 	var output bytes.Buffer
 	err := contract.WriteDeploymentPackage(&output, contract.DeploymentPackage{
-		Compose:      []byte("services:\n  web:\n    image: platform.example.invalid/demo/web:1.0.0\n    restart: unless-stopped\n"),
+		Compose:      []byte("services:\n  web:\n    image: metis.internal/demo/web:1.0.0\n"),
 		Environment:  map[string]string{"METIS_APP_ID": "demo", "EMPTY": ""},
 		Overlay:      map[string][]byte{"etc/app.conf": []byte("enabled=true\n")},
 		Package:      bytes.NewReader(packageData),
@@ -73,6 +73,82 @@ func TestWriteDeploymentPackageContainsOnlyRuntimeFiles(t *testing.T) {
 	}
 	if contents["program/start.sh"] != "#!/bin/sh\necho amd64\n" || strings.Contains(strings.Join(names, "\n"), "arm64") {
 		t.Fatalf("deployment architecture contents = %#v", contents)
+	}
+}
+
+func TestManagedDirectoriesFromCompose(t *testing.T) {
+	t.Parallel()
+	compose := []byte(`services:
+  postgres:
+    volumes:
+      - type: bind
+        source: ./data/postgres
+        target: /var/lib/postgresql/data
+  web:
+    volumes:
+      - type: bind
+        source: ./data/web/cache
+        target: /var/cache/web
+      - type: bind
+        source: ./overlay/static
+        target: /usr/share/web
+`)
+	got, err := contract.ManagedDirectoriesFromCompose(compose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"data/postgres", "data/web/cache"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ManagedDirectoriesFromCompose() = %#v, want %#v", got, want)
+	}
+}
+
+func TestManagedDirectoriesFromComposeRejectsAbsoluteRuntimeSource(t *testing.T) {
+	t.Parallel()
+	_, err := contract.ManagedDirectoriesFromCompose([]byte(`services:
+  web:
+    volumes:
+      - type: bind
+        source: /var/lib/metis/data/app
+        target: /var/lib/app
+`))
+	if err != nil {
+		t.Fatalf("absolute non-scope source should be ignored for final compose parsing: %v", err)
+	}
+}
+
+func TestWriteDeploymentPackageOrdersNestedManagedDirectories(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	if err := contract.WriteDeploymentPackage(&output, contract.DeploymentPackage{
+		Compose:            []byte("services: {}\n"),
+		Environment:        map[string]string{},
+		ManagedDirectories: []string{"data/postgres/wal"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gzipReader, err := gzip.NewReader(bytes.NewReader(output.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gzipReader.Close()
+	tarReader := tar.NewReader(gzipReader)
+	previous := -1
+	for index := 0; ; index++ {
+		header, nextErr := tarReader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+		if slices.Contains([]string{"data/", "data/postgres/", "data/postgres/wal/"}, header.Name) {
+			if header.Name == "data/" {
+				previous = index
+			} else if header.Name == "data/postgres/" && previous < 0 {
+				t.Fatal("nested managed directory was written before data/")
+			}
+		}
 	}
 }
 

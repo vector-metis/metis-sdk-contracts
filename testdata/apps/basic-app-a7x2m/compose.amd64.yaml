@@ -1,4 +1,3 @@
 services:
   web:
     image: basic-app-a7x2m/web:1.0.0
-    restart: unless-stopped

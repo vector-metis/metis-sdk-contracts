@@ -7,5 +7,6 @@ arch: [amd64]
 dependencies: []
 services:
   web:
+    lifecycle: {restart: unless-stopped, required: true}
     endpoints:
       - {name: web, protocol: http, container_port: 8080}
