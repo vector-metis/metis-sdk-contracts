@@ -1,11 +1,58 @@
 package contract
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
+
+func TestManifestPublicPathsContract(t *testing.T) {
+	data := []byte(`schema_version: 1
+id: public-app-a7x2m
+version: 1.0.0
+display_name: Public App
+type: web
+arch: [amd64]
+dependencies: []
+services:
+  web:
+    lifecycle: {restart: unless-stopped}
+    endpoints:
+      - name: web
+        protocol: http
+        container_port: 8080
+        public_paths: [/public, /callbacks/provider-a]
+`)
+	var manifest Manifest
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := manifest.validateIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := manifest.Services["web"].Endpoints[0].PublicPaths, []string{"/callbacks/provider-a", "/public"}; !slices.Equal(got, want) {
+		t.Fatalf("PublicPaths = %#v, want %#v", got, want)
+	}
+
+	invalid := [][]string{{"public"}, {"/public/"}, {"/public", "/public/assets"}, {"/public%2fadmin"}}
+	for index, paths := range invalid {
+		t.Run(fmt.Sprintf("invalid-%d", index), func(t *testing.T) {
+			copy := manifest
+			service := copy.Services["web"]
+			service.Endpoints[0].PublicPaths = paths
+			copy.Services = map[string]ManifestService{"web": service}
+			if err := copy.validateIdentity(); err == nil {
+				t.Fatalf("validateIdentity(%#v) succeeded", paths)
+			}
+		})
+	}
+	if !MatchesPublicPath([]string{"/public"}, "/public/child") || MatchesPublicPath([]string{"/public"}, "/publicity") {
+		t.Fatal("public path matching does not use complete segments")
+	}
+}
 
 // TestManifestRejectsAmbiguousDependencySelectors 验证包上传前即可拒绝不确定的 Runtime 选择器。
 func TestManifestRejectsAmbiguousDependencySelectors(t *testing.T) {

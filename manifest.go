@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -54,6 +55,9 @@ type ServiceEndpoint struct {
 	Protocol EndpointProtocol `yaml:"protocol" json:"protocol"`
 	// ContainerPort 是容器内监听端口，不是 Worker 或 Master 的分配端口。
 	ContainerPort int `yaml:"container_port" json:"containerPort"`
+	// PublicPaths 是无需平台登录和应用授权即可访问的应用内 HTTP 路径前缀。
+	// 空列表保持默认平台鉴权；根路径 / 表示整个应用入口公开。
+	PublicPaths []string `yaml:"public_paths,omitempty" json:"publicPaths,omitempty"`
 }
 
 // EnvironmentSource 描述 service 环境变量的唯一来源。
@@ -317,7 +321,7 @@ func rejectUnknownManifestFields(value *yaml.Node) error {
 					switch servicePair.key {
 					case "endpoints":
 						for _, endpoint := range sequenceItems(servicePair.value) {
-							if err := rejectMappingKeys(endpoint, map[string]struct{}{"name": {}, "service": {}, "protocol": {}, "container_port": {}}); err != nil {
+							if err := rejectMappingKeys(endpoint, map[string]struct{}{"name": {}, "service": {}, "protocol": {}, "container_port": {}, "public_paths": {}}); err != nil {
 								return err
 							}
 						}
@@ -490,15 +494,21 @@ func (m *Manifest) validateIdentity() error {
 func validateWebEndpoints(services map[string]ManifestService) error {
 	count := 0
 	for serviceName, service := range services {
-		for _, endpoint := range service.Endpoints {
+		for index, endpoint := range service.Endpoints {
 			if endpoint.Protocol != EndpointProtocolHTTP {
 				return withGateRule("MPK-MANIFEST-ENDPOINT", fmt.Errorf("manifest: web service %q can only declare http endpoints", serviceName))
 			}
 			if endpoint.Service != "" && endpoint.Service != serviceName {
 				return withGateRule("MPK-MANIFEST-ENDPOINT", fmt.Errorf("manifest: endpoint %q references unknown service %q", endpoint.Name, endpoint.Service))
 			}
+			publicPaths, err := NormalizePublicPaths(endpoint.PublicPaths)
+			if err != nil {
+				return withGateRule("MPK-MANIFEST-ENDPOINT", fmt.Errorf("manifest: endpoint %q public_paths: %w", endpoint.Name, err))
+			}
+			service.Endpoints[index].PublicPaths = publicPaths
 			count++
 		}
+		services[serviceName] = service
 	}
 	if count != 1 {
 		return withGateRule("MPK-MANIFEST-ENDPOINT", fmt.Errorf("manifest: web application requires exactly one http endpoint"))
@@ -513,6 +523,9 @@ func validateServiceManifestEndpoints(services map[string]ManifestService) error
 	}
 	for serviceName, declaration := range services {
 		for _, endpoint := range declaration.Endpoints {
+			if len(endpoint.PublicPaths) > 0 {
+				return withGateRule("MPK-MANIFEST-ENDPOINT", fmt.Errorf("manifest: endpoint %q public_paths is only supported by a web http endpoint", endpoint.Name))
+			}
 			if endpoint.Service != "" && endpoint.Service != serviceName {
 				return withGateRule("MPK-MANIFEST-ENDPOINT", fmt.Errorf("manifest: endpoint %q must belong to its declaring service %q", endpoint.Name, serviceName))
 			}
@@ -522,6 +535,76 @@ func validateServiceManifestEndpoints(services map[string]ManifestService) error
 		}
 	}
 	return withGateRule("MPK-MANIFEST-ENDPOINT", validateServiceEndpoints(endpoints, false))
+}
+
+// NormalizePublicPaths 校验公开路径声明并返回按字典序排列的独立副本。
+// 调用方必须保存返回值，不能依赖 manifest 中的声明顺序产生运行时语义。
+func NormalizePublicPaths(publicPaths []string) ([]string, error) {
+	if len(publicPaths) == 0 {
+		return nil, nil
+	}
+	if len(publicPaths) > 32 {
+		return nil, fmt.Errorf("must contain at most 32 paths")
+	}
+	normalized := slices.Clone(publicPaths)
+	for _, publicPath := range normalized {
+		if err := validatePublicPath(publicPath); err != nil {
+			return nil, fmt.Errorf("path %q %w", publicPath, err)
+		}
+	}
+	slices.Sort(normalized)
+	for index, publicPath := range normalized {
+		if index == 0 {
+			continue
+		}
+		parent := normalized[index-1]
+		if publicPath == parent {
+			return nil, fmt.Errorf("contains duplicate path %q", publicPath)
+		}
+		if parent == "/" || strings.HasPrefix(publicPath, parent+"/") {
+			return nil, fmt.Errorf("path %q is covered by %q", publicPath, parent)
+		}
+	}
+	return normalized, nil
+}
+
+func validatePublicPath(publicPath string) error {
+	if len(publicPath) == 0 || publicPath[0] != '/' {
+		return fmt.Errorf("must start with /")
+	}
+	if len(publicPath) > 256 {
+		return fmt.Errorf("must be at most 256 bytes")
+	}
+	if publicPath != "/" && strings.HasSuffix(publicPath, "/") {
+		return fmt.Errorf("must not end with /")
+	}
+	if strings.ContainsAny(publicPath, "?#") {
+		return fmt.Errorf("must not contain a query or fragment")
+	}
+	if strings.Contains(publicPath, `\`) {
+		return fmt.Errorf("must not contain a backslash")
+	}
+	if strings.Contains(publicPath, "%") {
+		return fmt.Errorf("must not contain percent-encoding")
+	}
+	if strings.IndexFunc(publicPath, unicode.IsControl) >= 0 {
+		return fmt.Errorf("must not contain a control character")
+	}
+	if path.Clean(publicPath) != publicPath {
+		return fmt.Errorf("must be canonical without empty, current or parent segments")
+	}
+	return nil
+}
+
+// MatchesPublicPath 按完整路径段判断应用内路径是否命中公开声明。
+// publicPaths 必须先经 NormalizePublicPaths 校验；query、方法和传输形态不属于该接口。
+func MatchesPublicPath(publicPaths []string, applicationPath string) bool {
+	for _, publicPath := range publicPaths {
+		if publicPath == "/" || applicationPath == publicPath || strings.HasPrefix(applicationPath, publicPath+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func flattenEndpoints(services map[string]ManifestService) []ServiceEndpoint {
