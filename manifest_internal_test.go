@@ -121,7 +121,7 @@ type: web
 arch: [amd64]
 dependencies: []
 settings:
-  unused: {label: Unused, type: string}
+  unused: {label: Unused, type: string, default: unused}
 models:
   llm.0: {interface: openai.chat.completions}
 services:

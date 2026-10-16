@@ -20,6 +20,34 @@ type Setting struct {
 	Required bool     `yaml:"required,omitempty" json:"required,omitempty"`
 	Default  string   `yaml:"default,omitempty" json:"default,omitempty"`
 	Options  []string `yaml:"options,omitempty" json:"options,omitempty"`
+	// DefaultSet records whether manifest explicitly declared default. An explicit
+	// empty value is valid, especially for secret settings.
+	DefaultSet bool `yaml:"-" json:"defaultSet,omitempty"`
+}
+
+// UnmarshalYAML preserves whether default was present in the manifest. This
+// distinguishes an explicit empty default from a missing default.
+func (setting *Setting) UnmarshalYAML(value *yaml.Node) error {
+	type settingYAML struct {
+		Label    string   `yaml:"label"`
+		Type     string   `yaml:"type"`
+		Required bool     `yaml:"required"`
+		Default  *string  `yaml:"default"`
+		Options  []string `yaml:"options"`
+	}
+	var raw settingYAML
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	setting.Label = raw.Label
+	setting.Type = raw.Type
+	setting.Required = raw.Required
+	setting.Options = raw.Options
+	setting.DefaultSet = raw.Default != nil
+	if raw.Default != nil {
+		setting.Default = *raw.Default
+	}
+	return nil
 }
 
 // ModelSlotBinding 是一个模型插槽在安装前必须补齐的三元组。
@@ -302,17 +330,21 @@ func ModelSlotsFromMetadata(metadata PackageMetadata, architecture string) ([]st
 	return modelSlots(metadata.Manifest, raw.Services), nil
 }
 
-// validateSettings 只做类型和封闭选项校验；secret 不提供默认值。
+// validateSettings validates overrides and ensures every setting has a usable
+// manifest default. Empty secret defaults are allowed by design.
 func validateSettings(definitions []Setting, values map[string]string) error {
 	for _, definition := range definitions {
-		if !definition.Required {
-			continue
+		if !definition.DefaultSet && definition.Default == "" {
+			return fmt.Errorf("mpk: setting %q must declare a default", definition.Key)
 		}
 		value, exists := values[definition.Key]
-		if !exists || value == "" {
-			if definition.Default == "" {
-				return fmt.Errorf("mpk: setting %q is required", definition.Key)
-			}
+		if !exists {
+			value = definition.Default
+		}
+		if definition.Required && definition.Type != "secret" && value == "" {
+			return fmt.Errorf("mpk: setting %q is required", definition.Key)
+		}
+		if value == "" && definition.Type == "secret" {
 			continue
 		}
 		switch definition.Type {
@@ -340,7 +372,36 @@ func validateSettings(definitions []Setting, values map[string]string) error {
 			return fmt.Errorf("mpk: setting %q has unsupported type %q", definition.Key, definition.Type)
 		}
 	}
+	for key := range values {
+		found := false
+		for _, definition := range definitions {
+			if definition.Key == key {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("mpk: setting %q is not declared", key)
+		}
+	}
 	return nil
+}
+
+// ValidateSettings is the shared entry point used by the platform preflight
+// and developer tooling for manifest defaults and install overrides.
+func ValidateSettings(definitions []Setting, values map[string]string) error {
+	return validateSettings(definitions, values)
+}
+
+// ModelSlotsFromManifest returns manifest model slots in stable order without
+// reading Compose or image archives.
+func ModelSlotsFromManifest(manifest Manifest) []string {
+	result := make([]string, 0, len(manifest.Models))
+	for slot := range manifest.Models {
+		result = append(result, slot)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // installEnvironment 扫描白名单占位符并生成完整注入值；未知占位符大声失败。

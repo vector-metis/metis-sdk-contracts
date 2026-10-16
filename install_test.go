@@ -407,8 +407,8 @@ func TestModelSlotsReadsSelectedArchitecture(t *testing.T) {
 	}
 }
 
-// TestPlanInstallRejectsMissingRequiredSetting 防止安装进入无法安全启动的半配置状态。
-func TestPlanInstallRejectsMissingRequiredSetting(t *testing.T) {
+// TestPlanInstallRejectsMissingSettingDefault 防止包绕过默认值契约进入安装流程。
+func TestPlanInstallRejectsMissingSettingDefault(t *testing.T) {
 	data := buildMPK(t, func(files map[string][]byte) {
 		files["manifest.yaml"] = []byte(`schema_version: 1
 id: demo-a7x2m
@@ -433,8 +433,8 @@ services:
 	_, err := contract.PlanInstall(bytes.NewReader(data), contract.InstallOptions{
 		Architecture: contract.ArchAMD64, BaseDir: "/tmp/app", AssignPort: func(string) (int, error) { return 19081, nil },
 	})
-	if err == nil || !strings.Contains(err.Error(), "setting \"required-token\" is required") {
-		t.Fatalf("PlanInstall() error = %v, want required setting failure", err)
+	if err == nil || !strings.Contains(err.Error(), "setting \"required-token\" must declare a default") {
+		t.Fatalf("PlanInstall() error = %v, want missing default failure", err)
 	}
 }
 

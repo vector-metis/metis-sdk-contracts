@@ -491,6 +491,15 @@ func (m *Manifest) validateIdentity() error {
 	return nil
 }
 
+// ValidateManifest exposes the same manifest validation used by MPK gates.
+// Callers should retain derived fields populated during validation.
+func ValidateManifest(manifest *Manifest) error {
+	if manifest == nil {
+		return fmt.Errorf("manifest: manifest is required")
+	}
+	return manifest.validateIdentity()
+}
+
 func validateWebEndpoints(services map[string]ManifestService) error {
 	count := 0
 	for serviceName, service := range services {
@@ -635,8 +644,11 @@ func validateManifestSettings(settings []Setting) error {
 			return fmt.Errorf("manifest: duplicate setting key %q", setting.Key)
 		}
 		seen[setting.Key] = struct{}{}
-		if setting.Type == "secret" && setting.Default != "" {
-			return fmt.Errorf("manifest: secret setting %q cannot have a default", setting.Key)
+		if !setting.DefaultSet && setting.Default == "" {
+			return fmt.Errorf("manifest: setting %q must declare a default", setting.Key)
+		}
+		if setting.Required && setting.Type != "secret" && setting.Default == "" {
+			return fmt.Errorf("manifest: setting %q is required and must have a non-empty default", setting.Key)
 		}
 		if setting.Type == "select" && len(setting.Options) == 0 {
 			return fmt.Errorf("manifest: select setting %q requires options", setting.Key)
@@ -644,20 +656,18 @@ func validateManifestSettings(settings []Setting) error {
 		if setting.Type != "select" && len(setting.Options) != 0 {
 			return fmt.Errorf("manifest: setting %q options are only valid for select", setting.Key)
 		}
-		if setting.Default != "" {
-			switch setting.Type {
-			case "number":
-				if _, err := strconv.ParseFloat(setting.Default, 64); err != nil {
-					return fmt.Errorf("manifest: setting %q default is not a number", setting.Key)
-				}
-			case "bool":
-				if setting.Default != "true" && setting.Default != "false" {
-					return fmt.Errorf("manifest: setting %q default is not a boolean", setting.Key)
-				}
-			case "select":
-				if !slices.Contains(setting.Options, setting.Default) {
-					return fmt.Errorf("manifest: setting %q default is not in options", setting.Key)
-				}
+		switch setting.Type {
+		case "number":
+			if _, err := strconv.ParseFloat(setting.Default, 64); err != nil {
+				return fmt.Errorf("manifest: setting %q default is not a number", setting.Key)
+			}
+		case "bool":
+			if setting.Default != "true" && setting.Default != "false" {
+				return fmt.Errorf("manifest: setting %q default is not a boolean", setting.Key)
+			}
+		case "select":
+			if !slices.Contains(setting.Options, setting.Default) {
+				return fmt.Errorf("manifest: setting %q default is not in options", setting.Key)
 			}
 		}
 	}

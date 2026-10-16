@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Settings now require an explicit `default`; empty defaults remain representable
+  for secret settings, and `ValidateSettings`/`ModelSlotsFromManifest` are
+  available to developer tooling.
+- Expose `ValidateManifest` so lightweight preflight and MPK gates share the
+  same manifest validation entry point.
 - `Mount` 改为 `source + subpath`，统一六类 managed mount root，并支持 overlay 文件和目录挂载。
 - 增加 manifest service lifecycle；源 Compose 不再允许 `restart` 或标准 `x-metis`。
 - 从镜像 Config.Volumes 提取 volume facts，未显式绑定的 image volume 返回 `MPK-VOLUME-UNMANAGED`。

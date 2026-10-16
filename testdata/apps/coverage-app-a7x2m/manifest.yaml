@@ -21,12 +21,12 @@ dependencies:
     required: false
     version: ">=1.0.0 <2.0.0"
 settings:
-  site_name: {label: Site name, type: string, required: true}
+  site_name: {label: Site name, type: string, required: true, default: Coverage}
   log_level: {label: Log level, type: select, required: true, default: info, options: [debug, info, warn]}
   max_upload_mb: {label: Upload limit, type: number, default: "32"}
   enable_audit: {label: Enable audit, type: bool, default: "true"}
-  webhook_token: {label: Webhook token, type: secret}
-  optional_console_token: {label: Optional console token, type: secret}
+  webhook_token: {label: Webhook token, type: secret, default: ""}
+  optional_console_token: {label: Optional console token, type: secret, default: ""}
 models:
   llm.0: {interface: openai.chat.completions}
   embedding.0: {interface: openai.embeddings}
