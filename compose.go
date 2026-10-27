@@ -10,6 +10,16 @@ import (
 )
 
 func validateCompose(manifest Manifest, files map[string][]byte, overlayPaths, overlayDirs map[string]struct{}, contractOnly bool) error {
+	return validateComposeWithImageMode(manifest, files, overlayPaths, overlayDirs, contractOnly, false)
+}
+
+// validateComposeSinglePass 在单趟扫描器已经检查镜像归档后校验 Compose 字段。
+// 此时 files 中的镜像成员只保留路径事实，不能在这里重新打开镜像归档。
+func validateComposeSinglePass(manifest Manifest, files map[string][]byte, overlayPaths, overlayDirs map[string]struct{}, contractOnly bool) error {
+	return validateComposeWithImageMode(manifest, files, overlayPaths, overlayDirs, contractOnly, true)
+}
+
+func validateComposeWithImageMode(manifest Manifest, files map[string][]byte, overlayPaths, overlayDirs map[string]struct{}, contractOnly, imagesAlreadyInspected bool) error {
 	var baseline map[string]struct{}
 	for _, architecture := range manifest.Architectures {
 		name := "compose." + architecture + ".yaml"
@@ -30,7 +40,7 @@ func validateCompose(manifest Manifest, files map[string][]byte, overlayPaths, o
 		if len(document.Services) == 0 {
 			return fmt.Errorf("mpk: %s has no services", name)
 		}
-		if err := validateComposeServices(manifest, name, document.Services, files, overlayPaths, overlayDirs, architecture, contractOnly); err != nil {
+		if err := validateComposeServices(manifest, name, document.Services, files, overlayPaths, overlayDirs, architecture, contractOnly, imagesAlreadyInspected); err != nil {
 			return err
 		}
 		if containsComposeInterpolation(rawDocument) {
@@ -69,7 +79,7 @@ func validateComposeServices(
 	overlayPaths map[string]struct{},
 	overlayDirs map[string]struct{},
 	architecture string,
-	contractOnly bool,
+	contractOnly, imagesAlreadyInspected bool,
 ) error {
 	composeImages := make(map[string]struct{})
 	serviceNames := make(map[string]struct{}, len(services))
@@ -151,7 +161,7 @@ func validateComposeServices(
 	if err := validateTargetImageCollisions(manifest.ID, composeImages); err != nil {
 		return fmt.Errorf("mpk: %s: %w", composeName, err)
 	}
-	if contractOnly {
+	if contractOnly || imagesAlreadyInspected {
 		// 契约 fixture 不携带镜像；镜像引用的语法与保留 tag 规则仍然必须通过。
 		return nil
 	}

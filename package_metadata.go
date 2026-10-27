@@ -3,6 +3,8 @@ package contract
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -15,22 +17,88 @@ import (
 )
 
 const (
-	maxPackagePathSize = 1024
-	maxPackageEntries  = 10000
-	maxManifestSize    = 1 << 20
-	maxSettingsSize    = 1 << 20
-	maxAboutSize       = 4 << 20
-	maxComposeSize     = 4 << 20
+	maxPackagePathSize  = 1024
+	maxPackageEntries   = 10000
+	maxManifestSize     = 1 << 20
+	maxSettingsSize     = 1 << 20
+	maxAboutSize        = 4 << 20
+	maxReleaseNotesSize = 4 << 20
+	maxComposeSize      = 4 << 20
+	// MaxSkillFiles 和 MaxSkillSize 限制单个 MPK 中 Skill 的元数据预算。
+	// Skill 正文不会进入 PackageMetadata 持久化快照。
+	MaxSkillFiles    = 512
+	MaxSkillSize     = 16 << 20
+	maxSkillFileSize = MaxSkillSize
 )
+
+// SkillFileMetadata 是 Skill 文件的不可变内容事实；Content 不进入该结构。
+type SkillFileMetadata struct {
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+// ValidateStandaloneSkillFiles 校验独立 Skill ZIP 解包后的文件清单。
+//
+// 独立 Skill 不携带 MPK manifest，但继续使用应用 Skill 的目录、SKILL.md
+// frontmatter、大小和 UTF-8 规则，保证商店、平台上传和离线导入共用同一门禁。
+// files 的 key 必须是 skills/{name}/{path}，函数只返回摘要，不保留正文。
+func ValidateStandaloneSkillFiles(skillName string, files map[string][]byte) ([]SkillFileMetadata, error) {
+	skillName = strings.TrimSpace(skillName)
+	if !providedNamePattern.MatchString(skillName) {
+		return nil, fmt.Errorf("mpk: standalone skill name %q is invalid", skillName)
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("mpk: standalone skill %q is empty", skillName)
+	}
+	count := 0
+	var total int64
+	result := make([]SkillFileMetadata, 0, len(files))
+	hasManifest := false
+	prefix := "skills/" + skillName + "/"
+	for name, content := range files {
+		clean := path.Clean(name)
+		if clean != name || !strings.HasPrefix(name, prefix) || path.IsAbs(name) || strings.Contains(name, "\\") {
+			return nil, fmt.Errorf("mpk: standalone skill contains unsafe path %q", name)
+		}
+		relative := strings.TrimPrefix(name, prefix)
+		if relative == "" || relative == "." || strings.HasPrefix(relative, "../") {
+			return nil, fmt.Errorf("mpk: standalone skill path %q is invalid", name)
+		}
+		count++
+		total += int64(len(content))
+		if count > MaxSkillFiles || total > MaxSkillSize || int64(len(content)) > maxSkillFileSize {
+			return nil, fmt.Errorf("mpk: standalone skill %q exceeds %d files or %d bytes", skillName, MaxSkillFiles, MaxSkillSize)
+		}
+		if relative == "SKILL.md" {
+			hasManifest = true
+			if err := validateSkillDocument(skillName, content); err != nil {
+				return nil, fmt.Errorf("mpk: standalone skill %q: %w", skillName, err)
+			}
+		} else if !utf8.Valid(content) {
+			return nil, fmt.Errorf("mpk: standalone skill file %q is not valid UTF-8", name)
+		}
+		digest := sha256.Sum256(content)
+		result = append(result, SkillFileMetadata{Path: name, Size: int64(len(content)), SHA256: hex.EncodeToString(digest[:])})
+	}
+	if !hasManifest {
+		return nil, fmt.Errorf("mpk: standalone skill %q must contain SKILL.md", skillName)
+	}
+	sort.Slice(result, func(left, right int) bool { return result[left].Path < result[right].Path })
+	return result, nil
+}
 
 // PackageMetadata 是 Master 准备应用包时需要持久化的小型只读快照。
 // Compose 按架构保存原始 YAML；镜像归档和其他大文件永远不会进入该结构。
 type PackageMetadata struct {
-	Manifest  Manifest          `json:"manifest"`
-	AboutMD   string            `json:"aboutMarkdown,omitempty"`
-	Settings  []Setting         `json:"settings"`
-	Compose   map[string]string `json:"compose"`
-	FileCount int               `json:"fileCount"`
+	Manifest Manifest `json:"manifest"`
+	AboutMD  string   `json:"aboutMarkdown,omitempty"`
+	// ReleaseNotesMD 是当前 MPK 版本的可选更新说明，不参与安装契约校验。
+	ReleaseNotesMD string              `json:"releaseNotesMarkdown,omitempty"`
+	Settings       []Setting           `json:"settings"`
+	Compose        map[string]string   `json:"compose"`
+	SkillFiles     []SkillFileMetadata `json:"skillFiles,omitempty"`
+	FileCount      int                 `json:"fileCount"`
 }
 
 // InspectPackageIdentity 按 tar 顺序读取受限的 manifest，不物化镜像等其他包内容。
@@ -140,8 +208,15 @@ func inspectPackageMetadata(reader io.Reader, expectedAppID, expectedVersion str
 	if err := validateCompose(manifest, files, overlayPaths, overlayDirs, true); err != nil {
 		return nil, err
 	}
+	skillFiles, err := collectSkillFiles(manifest, files)
+	if err != nil {
+		return nil, err
+	}
 	if about := files["about.md"]; !utf8.Valid(about) {
 		return nil, fmt.Errorf("mpk: about.md is not valid UTF-8")
+	}
+	if releaseNotes := files["release-notes.md"]; !utf8.Valid(releaseNotes) {
+		return nil, fmt.Errorf("mpk: release-notes.md is not valid UTF-8")
 	}
 
 	sort.Strings(manifest.Architectures)
@@ -151,8 +226,8 @@ func inspectPackageMetadata(reader io.Reader, expectedAppID, expectedVersion str
 		compose[architecture] = string(files["compose."+architecture+".yaml"])
 	}
 	return &PackageMetadata{
-		Manifest: manifest, AboutMD: string(files["about.md"]), Settings: manifest.Settings,
-		Compose: compose, FileCount: fileCount,
+		Manifest: manifest, AboutMD: string(files["about.md"]), ReleaseNotesMD: string(files["release-notes.md"]), Settings: manifest.Settings,
+		Compose: compose, SkillFiles: skillFiles, FileCount: fileCount,
 	}, nil
 }
 
@@ -164,6 +239,7 @@ func scanPackageMetadataTar(reader io.Reader, maxPackageSize int64) (map[string]
 	overlayDirs := make(map[string]struct{})
 	fileCount := 0
 	entryCount := 0
+	var skillBytes int64
 	var expanded int64
 	expandedLimit := maxPackageSize * 2
 	if maxPackageSize > int64(^uint64(0)>>1)/2 {
@@ -201,6 +277,12 @@ func scanPackageMetadataTar(reader io.Reader, maxPackageSize int64) (map[string]
 				return nil, nil, nil, nil, 0, fmt.Errorf("mpk: expanded package size exceeds %d bytes", expandedLimit)
 			}
 			expanded += header.Size
+			if strings.HasPrefix(name, "skills/") {
+				if header.Size > maxSkillFileSize || skillBytes > MaxSkillSize-header.Size {
+					return nil, nil, nil, nil, 0, fmt.Errorf("mpk: skill files exceed %d bytes", MaxSkillSize)
+				}
+				skillBytes += header.Size
+			}
 		case tar.TypeSymlink, tar.TypeLink, tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
 			return nil, nil, nil, nil, 0, fmt.Errorf("mpk: forbidden non-regular node %q", name)
 		default:
@@ -238,11 +320,125 @@ func metadataFileLimit(name string) int64 {
 		return maxManifestSize
 	case name == "about.md":
 		return maxAboutSize
+	case name == "release-notes.md":
+		return maxReleaseNotesSize
 	case name == "settings.yaml":
 		return maxSettingsSize
 	case name == "compose.amd64.yaml" || name == "compose.arm64.yaml":
 		return maxComposeSize
+	case isSkillFilePath(name):
+		return maxSkillFileSize
 	default:
 		return 0
 	}
+}
+
+func isSkillFilePath(name string) bool {
+	return strings.HasPrefix(name, "skills/") && strings.TrimPrefix(name, "skills/") != ""
+}
+
+// collectSkillFiles 校验 manifest 声明与包内 skills/ 文件的一一对应关系，并生成稳定清单。
+func collectSkillFiles(manifest Manifest, files map[string][]byte) ([]SkillFileMetadata, error) {
+	declared := make(map[string]struct{}, len(manifest.Provides.Skills))
+	for _, name := range manifest.Provides.Skills {
+		declared[name] = struct{}{}
+	}
+	counts := make(map[string]int, len(declared))
+	bytesBySkill := make(map[string]int64, len(declared))
+	hasManifest := make(map[string]bool, len(declared))
+	result := make([]SkillFileMetadata, 0)
+	for name, content := range files {
+		if !isSkillFilePath(name) {
+			continue
+		}
+		relative := strings.TrimPrefix(name, "skills/")
+		parts := strings.SplitN(relative, "/", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, fmt.Errorf("mpk: skill file %q must be skills/{name}/{path}", name)
+		}
+		skillName, relativePath := parts[0], parts[1]
+		if _, ok := declared[skillName]; !ok {
+			return nil, fmt.Errorf("mpk: skill %q is not declared in manifest.provides.skills", skillName)
+		}
+		counts[skillName]++
+		bytesBySkill[skillName] += int64(len(content))
+		if counts[skillName] > MaxSkillFiles || bytesBySkill[skillName] > MaxSkillSize {
+			return nil, fmt.Errorf("mpk: skill %q exceeds %d files or %d bytes", skillName, MaxSkillFiles, MaxSkillSize)
+		}
+		if relativePath == "SKILL.md" {
+			hasManifest[skillName] = true
+			if err := validateSkillDocument(skillName, content); err != nil {
+				return nil, fmt.Errorf("mpk: skill %q: %w", skillName, err)
+			}
+		}
+		digest := sha256.Sum256(content)
+		result = append(result, SkillFileMetadata{Path: name, Size: int64(len(content)), SHA256: hex.EncodeToString(digest[:])})
+	}
+	for _, skillName := range manifest.Provides.Skills {
+		if !hasManifest[skillName] {
+			return nil, fmt.Errorf("mpk: skill %q must contain SKILL.md", skillName)
+		}
+	}
+	if len(result) == 0 && len(manifest.Provides.Skills) > 0 {
+		return nil, fmt.Errorf("mpk: manifest declares skills but package contains no skill files")
+	}
+	sort.Slice(result, func(left, right int) bool { return result[left].Path < result[right].Path })
+	return result, nil
+}
+
+func validateSkillDocument(skillName string, content []byte) error {
+	if !utf8.Valid(content) {
+		return fmt.Errorf("SKILL.md is not valid UTF-8")
+	}
+	text := string(content)
+	if !strings.HasPrefix(text, "---\n") {
+		return fmt.Errorf("SKILL.md frontmatter is required")
+	}
+	end := strings.Index(text[4:], "\n---\n")
+	if end < 0 {
+		return fmt.Errorf("SKILL.md frontmatter is not closed")
+	}
+	frontmatter := text[4 : 4+end]
+	var node yaml.Node
+	if err := yaml.Unmarshal([]byte(frontmatter), &node); err != nil {
+		return fmt.Errorf("SKILL.md frontmatter is invalid YAML: %w", err)
+	}
+	if node.Kind != yaml.DocumentNode || len(node.Content) != 1 || node.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("SKILL.md frontmatter must be a mapping")
+	}
+	allowed := map[string]struct{}{"name": {}, "description": {}, "license": {}, "compatibility": {}, "metadata": {}}
+	var nameValue, descriptionValue string
+	for _, pair := range mappingPairs(node.Content[0]) {
+		if _, ok := allowed[pair.key]; !ok {
+			return fmt.Errorf("SKILL.md frontmatter has unknown field %q", pair.key)
+		}
+		if pair.key == "name" || pair.key == "description" || pair.key == "license" || pair.key == "compatibility" {
+			if pair.value.Kind != yaml.ScalarNode || pair.value.Tag != "!!str" {
+				return fmt.Errorf("SKILL.md frontmatter field %q must be a string", pair.key)
+			}
+			switch pair.key {
+			case "name":
+				nameValue = pair.value.Value
+			case "description":
+				descriptionValue = pair.value.Value
+			}
+		}
+		if pair.key == "metadata" {
+			if pair.value.Kind != yaml.MappingNode {
+				return fmt.Errorf("SKILL.md frontmatter metadata must be a mapping")
+			}
+			for _, metadataPair := range mappingPairs(pair.value) {
+				if metadataPair.value.Kind != yaml.ScalarNode || metadataPair.value.Tag != "!!str" {
+					return fmt.Errorf("SKILL.md frontmatter metadata values must be strings")
+				}
+			}
+		}
+	}
+	if nameValue != skillName || !providedNamePattern.MatchString(nameValue) {
+		return fmt.Errorf("SKILL.md name must equal directory name %q", skillName)
+	}
+	if descriptionValue == "" || len(descriptionValue) > 1024 {
+		return fmt.Errorf("SKILL.md description is required and must be at most 1024 bytes")
+	}
+	return nil
 }

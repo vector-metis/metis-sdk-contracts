@@ -9,51 +9,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestManifestPublicPathsContract(t *testing.T) {
-	data := []byte(`schema_version: 1
-id: public-app-a7x2m
-version: 1.0.0
-display_name: Public App
-type: web
-arch: [amd64]
-dependencies: []
-services:
-  web:
-    lifecycle: {restart: unless-stopped}
-    endpoints:
-      - name: web
-        protocol: http
-        container_port: 8080
-        public_paths: [/public, /callbacks/provider-a]
-`)
-	var manifest Manifest
-	if err := yaml.Unmarshal(data, &manifest); err != nil {
-		t.Fatal(err)
-	}
-	if err := manifest.validateIdentity(); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := manifest.Services["web"].Endpoints[0].PublicPaths, []string{"/callbacks/provider-a", "/public"}; !slices.Equal(got, want) {
-		t.Fatalf("PublicPaths = %#v, want %#v", got, want)
-	}
-
-	invalid := [][]string{{"public"}, {"/public/"}, {"/public", "/public/assets"}, {"/public%2fadmin"}}
-	for index, paths := range invalid {
-		t.Run(fmt.Sprintf("invalid-%d", index), func(t *testing.T) {
-			copy := manifest
-			service := copy.Services["web"]
-			service.Endpoints[0].PublicPaths = paths
-			copy.Services = map[string]ManifestService{"web": service}
-			if err := copy.validateIdentity(); err == nil {
-				t.Fatalf("validateIdentity(%#v) succeeded", paths)
-			}
-		})
-	}
-	if !MatchesPublicPath([]string{"/public"}, "/public/child") || MatchesPublicPath([]string{"/public"}, "/publicity") {
-		t.Fatal("public path matching does not use complete segments")
-	}
-}
-
 // TestManifestRejectsAmbiguousDependencySelectors 验证包上传前即可拒绝不确定的 Runtime 选择器。
 func TestManifestRejectsAmbiguousDependencySelectors(t *testing.T) {
 	base := Manifest{
@@ -138,6 +93,132 @@ services:
 	}
 }
 
+// TestManifestAcceptsAndSortsPublicPaths 固化公开路径属于唯一 Web HTTP endpoint，
+// 并在进入 Store、安装快照和运行时前形成确定的排序结果。
+func TestManifestAcceptsAndSortsPublicPaths(t *testing.T) {
+	data := []byte(`schema_version: 1
+id: public-app-a7x2m
+version: 1.0.0
+display_name: Public App
+type: web
+arch: [amd64]
+dependencies: []
+services:
+  web:
+    lifecycle: {restart: unless-stopped}
+    endpoints:
+      - name: web
+        protocol: http
+        container_port: 8080
+        public_paths: [/public, /callbacks/provider-a]
+`)
+	var manifest Manifest
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v", err)
+	}
+	if err := manifest.validateIdentity(); err != nil {
+		t.Fatalf("validateIdentity() error = %v", err)
+	}
+	paths := manifest.Services["web"].Endpoints[0].PublicPaths
+	want := []string{"/callbacks/provider-a", "/public"}
+	if !slices.Equal(paths, want) {
+		t.Fatalf("PublicPaths = %#v, want %#v", paths, want)
+	}
+}
+
+// TestManifestRejectsInvalidPublicPaths 覆盖公开入口不能依赖字节前缀、路径清理
+// 或转义差异来扩大匿名访问面的安全边界。
+func TestManifestRejectsInvalidPublicPaths(t *testing.T) {
+	base := Manifest{
+		SchemaVersion: 1, ID: "public-app-a7x2m", Version: "1.0.0", DisplayName: "Public App", Type: ApplicationTypeWeb,
+		Architectures: []string{ArchAMD64}, Dependencies: []Dependency{},
+		Services: map[string]ManifestService{
+			"web": {Lifecycle: ServiceLifecycle{Restart: "unless-stopped"}, Endpoints: []ServiceEndpoint{{Name: "web", Service: "web", Protocol: EndpointProtocolHTTP, ContainerPort: 8080}}},
+		},
+	}
+	tooMany := make([]string, 33)
+	for index := range tooMany {
+		tooMany[index] = fmt.Sprintf("/path-%d", index)
+	}
+	tests := []struct {
+		name  string
+		paths []string
+		want  string
+	}{
+		{name: "relative", paths: []string{"public"}, want: "must start with /"},
+		{name: "trailing slash", paths: []string{"/public/"}, want: "must not end with /"},
+		{name: "empty segment", paths: []string{"/public//assets"}, want: "canonical"},
+		{name: "current segment", paths: []string{"/public/./assets"}, want: "canonical"},
+		{name: "parent segment", paths: []string{"/public/../admin"}, want: "canonical"},
+		{name: "query", paths: []string{"/public?admin=1"}, want: "query or fragment"},
+		{name: "fragment", paths: []string{"/public#admin"}, want: "query or fragment"},
+		{name: "backslash", paths: []string{`/public\admin`}, want: "backslash"},
+		{name: "encoded slash", paths: []string{"/public%2fadmin"}, want: "percent-encoding"},
+		{name: "control character", paths: []string{"/public\nadmin"}, want: "control character"},
+		{name: "duplicate", paths: []string{"/public", "/public"}, want: "duplicate"},
+		{name: "root covers child", paths: []string{"/", "/public"}, want: "covered by"},
+		{name: "parent covers child", paths: []string{"/public/assets", "/public"}, want: "covered by"},
+		{name: "too many", paths: tooMany, want: "at most 32"},
+		{name: "too long", paths: []string{"/" + strings.Repeat("a", 256)}, want: "at most 256 bytes"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := base
+			service := manifest.Services["web"]
+			endpoint := service.Endpoints[0]
+			endpoint.PublicPaths = test.paths
+			service.Endpoints = []ServiceEndpoint{endpoint}
+			manifest.Services = map[string]ManifestService{"web": service}
+			if err := manifest.validateIdentity(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validateIdentity() error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+// TestManifestRejectsPublicPathsOnServiceEndpoint 固化原始 TCP/UDP endpoint 不具有
+// HTTP 路径语义，避免声明被静默接受但运行时永远不生效。
+func TestManifestRejectsPublicPathsOnServiceEndpoint(t *testing.T) {
+	manifest := Manifest{
+		SchemaVersion: 1, ID: "public-service-a7x2m", Version: "1.0.0", DisplayName: "Public Service", Type: ApplicationTypeService,
+		Architectures: []string{ArchAMD64}, Dependencies: []Dependency{},
+		Services: map[string]ManifestService{
+			"database": {Lifecycle: ServiceLifecycle{Restart: "unless-stopped"}, Endpoints: []ServiceEndpoint{{
+				Name: "database", Service: "database", Protocol: EndpointProtocolTCP, ContainerPort: 5432, PublicPaths: []string{"/public"},
+			}}},
+		},
+	}
+	if err := manifest.validateIdentity(); err == nil || !strings.Contains(err.Error(), "public_paths is only supported") {
+		t.Fatalf("validateIdentity() error = %v, want public_paths protocol rejection", err)
+	}
+}
+
+func TestMatchesPublicPathUsesCompleteSegments(t *testing.T) {
+	t.Parallel()
+	publicPaths := []string{"/callbacks/provider-a", "/public"}
+	for _, test := range []struct {
+		path string
+		want bool
+	}{
+		{path: "/public", want: true},
+		{path: "/public/", want: true},
+		{path: "/public/assets/app.js", want: true},
+		{path: "/publicity", want: false},
+		{path: "/callbacks/provider-a", want: true},
+		{path: "/callbacks/provider-ab", want: false},
+		{path: "/", want: false},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			if got := MatchesPublicPath(publicPaths, test.path); got != test.want {
+				t.Fatalf("MatchesPublicPath(%q) = %v, want %v", test.path, got, test.want)
+			}
+		})
+	}
+	if !MatchesPublicPath([]string{"/"}, "/anything") {
+		t.Fatal("root public path did not match the whole application")
+	}
+}
+
 func TestManifestRejectsInvalidModelCapabilityDeclaration(t *testing.T) {
 	base := Manifest{
 		SchemaVersion: 1, ID: "model-app-a7x2m", Version: "1.0.0", DisplayName: "Model", Type: ApplicationTypeWeb,
@@ -177,6 +258,70 @@ func TestManifestRejectsInvalidModelCapabilityDeclaration(t *testing.T) {
 		})
 	}
 }
+
+// TestManifestRuntimeConfigCapabilityValidatesServiceProjection 验证运行配置按 service
+// 声明 settings 和直接执行事件，且不会把配置正文塞进命令参数。
+func TestManifestRuntimeConfigCapabilityValidatesServiceProjection(t *testing.T) {
+	setting := Setting{Key: "system-prompt", Label: "Prompt", Type: "string", Default: "hello", DefaultSet: true}
+	manifest := Manifest{
+		SchemaVersion: 1, ID: "runtime-config-a7x2m", Version: "1.0.0", DisplayName: "Runtime", Type: ApplicationTypeWeb,
+		Architectures: []string{ArchAMD64}, Settings: []Setting{setting}, Models: map[string]ModelSlot{
+			"llm.0": {Interface: "openai.chat.completions"},
+		}, Services: map[string]ManifestService{
+			"web": {
+				Lifecycle:   ServiceLifecycle{Restart: "unless-stopped"},
+				Endpoints:   []ServiceEndpoint{{Name: "web", Service: "web", Protocol: EndpointProtocolHTTP, ContainerPort: 8080}},
+				Environment: map[string]EnvironmentSource{"SYSTEM_PROMPT": {Setting: stringPtr("system-prompt")}},
+				Capabilities: map[string]CapabilityRequest{
+					"model-gateway":  {Slots: []string{"llm.0"}},
+					"runtime-config": {Settings: []string{"system-prompt"}, Events: map[string][]string{"setting_changed": {"/app/bin/config", "--reload"}}},
+				},
+			},
+		},
+	}
+	if err := manifest.validateIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	manifest.Services["web"].Capabilities["runtime-config"] = CapabilityRequest{Settings: []string{"missing"}}
+	if err := manifest.validateIdentity(); err == nil || !strings.Contains(err.Error(), "undeclared setting") {
+		t.Fatalf("validateIdentity() error = %v, want undeclared setting", err)
+	}
+}
+
+func TestManifestYAMLAcceptsRuntimeConfigEvents(t *testing.T) {
+	data := []byte(`schema_version: 1
+id: runtime-events-a7x2m
+version: 1.0.0
+display_name: Runtime Events
+type: web
+arch: [amd64]
+dependencies: []
+models:
+  llm.0: {interface: openai.chat.completions}
+services:
+  web:
+    lifecycle: {restart: unless-stopped}
+    endpoints: [{name: web, protocol: http, container_port: 8080}]
+    capabilities:
+      model-gateway: {slots: [llm.0]}
+      runtime-config:
+        events:
+          model_slot_changed: ["/app/bin/runtime", "--reload"]
+`)
+	var manifest Manifest
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := manifest.validateIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	events := manifest.Services["web"].Capabilities["runtime-config"].Events
+	if len(events["model_slot_changed"]) != 2 || events["model_slot_changed"][0] != "/app/bin/runtime" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func stringPtr(value string) *string { return &value }
 
 func TestManifestRejectsReservedAndDuplicateMountTargets(t *testing.T) {
 	base := Manifest{

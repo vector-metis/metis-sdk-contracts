@@ -16,6 +16,7 @@ import (
 var endpointNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 var manifestPlaceholderPattern = regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`)
 var modelSlotPattern = regexp.MustCompile(`^(llm|embedding|rerank)\.[0-9]+$`)
+var providedNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
 // 支持的架构和能力名称是封闭集合，消费方用于校验、界面展示和安装兼容性判断。
 const (
@@ -83,6 +84,24 @@ type ServiceLifecycle struct {
 	Required *bool  `yaml:"required,omitempty" json:"required,omitempty"`
 }
 
+// MCPProvider 声明应用提供给平台 MCP 注册中心的一个 MCP 服务。
+// Endpoint 必须引用 manifest.services 中的 endpoint 名称；Path 是应用容器内的
+// MCP Streamable HTTP 路径。治理属性（范围、受限和授权）不属于 MPK 声明，
+// 由平台目录在安装后维护。
+type MCPProvider struct {
+	Name        string `yaml:"name" json:"name"`
+	Description string `yaml:"description" json:"description"`
+	Endpoint    string `yaml:"endpoint" json:"endpoint"`
+	Path        string `yaml:"path" json:"path"`
+}
+
+// Provides 是应用对外提供的智能体接口声明。
+// 使用方不在 manifest 中声明依赖，平台在运行时目录中发现并按策略授权。
+type Provides struct {
+	MCP    []MCPProvider `yaml:"mcp,omitempty" json:"mcp,omitempty"`
+	Skills []string      `yaml:"skills,omitempty" json:"skills,omitempty"`
+}
+
 // IsRequired 返回服务是否参与 Master 的必需服务门禁；省略时保持常驻服务默认必需。
 func (lifecycle ServiceLifecycle) IsRequired() bool {
 	return lifecycle.Required == nil || *lifecycle.Required
@@ -92,6 +111,10 @@ func (lifecycle ServiceLifecycle) IsRequired() bool {
 // slots 只对 model-gateway 有意义，其余能力必须使用空对象。
 type CapabilityRequest struct {
 	Slots []string `yaml:"slots,omitempty" json:"slots,omitempty"`
+	// Settings 只对 runtime-config 有意义，列出该 service 可通过 Runtime Config 读取的 setting key。
+	Settings []string `yaml:"settings,omitempty" json:"settings,omitempty"`
+	// Events 只对 runtime-config 有意义；值是容器内直接执行的 argv，不经过 shell。
+	Events map[string][]string `yaml:"events,omitempty" json:"events,omitempty"`
 }
 
 // ModelSlot 是 manifest 顶层声明的模型插槽。
@@ -132,7 +155,18 @@ var Capabilities = map[string]struct{}{
 	"object-storage":   {},
 	"model-gateway":    {},
 	"platform-api":     {},
+	"runtime-config":   {},
 	"compose-override": {},
+}
+
+// RuntimeConfigEvents 是运行配置变化通知的稳定事件闭集。
+var RuntimeConfigEvents = map[string]struct{}{
+	"model_slot_changed":     {},
+	"model_metadata_changed": {},
+	"setting_changed":        {},
+	"storage_changed":        {},
+	"tenant_changed":         {},
+	"feature_changed":        {},
 }
 
 // ModelInterfaces 是 MPK v1 声明模型 slot 时允许的透传协议闭集。
@@ -173,6 +207,7 @@ type Manifest struct {
 	Settings     []Setting                  `yaml:"settings" json:"settings"`
 	Models       map[string]ModelSlot       `yaml:"models" json:"models"`
 	Services     map[string]ManifestService `yaml:"services" json:"services"`
+	Provides     Provides                   `yaml:"provides,omitempty" json:"provides,omitempty"`
 }
 
 // ComposeService 只包含确定性校验所需字段；未知字段保留在原始 map 中，Agent 可原样写出 Compose 模板。
@@ -205,6 +240,7 @@ type manifestForDecode struct {
 	Settings           *map[string]Setting         `yaml:"settings"`
 	Models             *map[string]ModelSlot       `yaml:"models"`
 	Services           *map[string]ManifestService `yaml:"services"`
+	Provides           *Provides                   `yaml:"provides"`
 	PrimaryService     *string                     `yaml:"primary_service"`
 	ContainerPort      *int                        `yaml:"container_port"`
 	Endpoints          *[]ServiceEndpoint          `yaml:"endpoints"`
@@ -255,6 +291,9 @@ func (m *Manifest) UnmarshalYAML(value *yaml.Node) error {
 		m.Models = map[string]ModelSlot{}
 	}
 	m.Services = *raw.Services
+	if raw.Provides != nil {
+		m.Provides = *raw.Provides
+	}
 	for serviceName, service := range m.Services {
 		if serviceName == "" {
 			return fmt.Errorf("manifest: service name cannot be empty")
@@ -284,6 +323,7 @@ func rejectUnknownManifestFields(value *yaml.Node) error {
 		"type": {}, "description": {}, "integration_docs_url": {}, "screenshots": {},
 		"arch": {}, "capabilities": {}, "dependencies": {}, "settings": {},
 		"models": {}, "services": {}, "primary_service": {}, "container_port": {}, "endpoints": {},
+		"provides": {},
 	}); err != nil {
 		return err
 	}
@@ -309,6 +349,12 @@ func rejectUnknownManifestFields(value *yaml.Node) error {
 					"dimensions": {},
 					"required":   {},
 				}); err != nil {
+					return err
+				}
+			}
+		case "provides":
+			for _, provider := range mappingValues(pair.value) {
+				if err := rejectMappingKeys(provider, map[string]struct{}{"name": {}, "description": {}, "endpoint": {}, "path": {}}); err != nil {
 					return err
 				}
 			}
@@ -343,7 +389,7 @@ func rejectUnknownManifestFields(value *yaml.Node) error {
 						}
 					case "capabilities":
 						for _, capability := range mappingValues(servicePair.value) {
-							if err := rejectMappingKeys(capability, map[string]struct{}{"slots": {}}); err != nil {
+							if err := rejectMappingKeys(capability, map[string]struct{}{"slots": {}, "settings": {}, "events": {}}); err != nil {
 								return err
 							}
 						}
@@ -451,8 +497,11 @@ func (m *Manifest) validateIdentity() error {
 		}
 		seenArch[architecture] = struct{}{}
 	}
-	capabilities, err := validateServiceCapabilities(m.Services, m.Models)
+	capabilities, err := validateServiceCapabilities(m.Services, m.Models, m.Settings)
 	if err != nil {
+		return err
+	}
+	if err := validateProvides(m.Type, m.Services, m.Provides); err != nil {
 		return err
 	}
 	m.Capabilities = capabilities
@@ -491,8 +540,103 @@ func (m *Manifest) validateIdentity() error {
 	return nil
 }
 
-// ValidateManifest exposes the same manifest validation used by MPK gates.
-// Callers should retain derived fields populated during validation.
+// validateProvides 校验应用智能体接口声明，并把它限制在 manifest 已声明的端点上。
+// 这里只校验开发者能在 MPK 中确定的事实；受限、范围和授权属于平台运行时治理。
+func validateProvides(applicationType ApplicationType, services map[string]ManifestService, provides Provides) error {
+	if len(provides.MCP) > 64 {
+		return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: provides.mcp contains at most 64 servers"))
+	}
+	if len(provides.Skills) > 64 {
+		return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: provides.skills contains at most 64 skills"))
+	}
+	endpoints := flattenEndpoints(services)
+	endpointByName := make(map[string]ServiceEndpoint, len(endpoints))
+	for _, endpoint := range endpoints {
+		endpointByName[endpoint.Name] = endpoint
+	}
+	seenMCP := make(map[string]struct{}, len(provides.MCP))
+	seenPaths := make(map[string]struct{}, len(provides.MCP))
+	for index, provider := range provides.MCP {
+		if !providedNamePattern.MatchString(provider.Name) {
+			return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: provides.mcp[%d].name must match %s", index, providedNamePattern.String()))
+		}
+		if _, exists := seenMCP[provider.Name]; exists {
+			return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: duplicate MCP provider %q", provider.Name))
+		}
+		seenMCP[provider.Name] = struct{}{}
+		if strings.TrimSpace(provider.Description) == "" {
+			return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: MCP provider %q description is required", provider.Name))
+		}
+		if len(provider.Description) > 1024 {
+			return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: MCP provider %q description must be at most 1024 bytes", provider.Name))
+		}
+		endpoint, exists := endpointByName[provider.Endpoint]
+		if !exists || strings.TrimSpace(provider.Endpoint) == "" {
+			return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: MCP provider %q references unknown endpoint %q", provider.Name, provider.Endpoint))
+		}
+		if applicationType == ApplicationTypeWeb && endpoint.Protocol != EndpointProtocolHTTP {
+			return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: MCP provider %q on web application must use an http endpoint", provider.Name))
+		}
+		if applicationType == ApplicationTypeService && endpoint.Protocol != EndpointProtocolTCP {
+			return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: MCP provider %q on service application must use a tcp endpoint", provider.Name))
+		}
+		if err := validateMCPPath(provider.Path); err != nil {
+			return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: MCP provider %q path: %w", provider.Name, err))
+		}
+		pathKey := provider.Endpoint + "\x00" + provider.Path
+		if _, exists := seenPaths[pathKey]; exists {
+			return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: duplicate MCP provider path %q on endpoint %q", provider.Path, provider.Endpoint))
+		}
+		seenPaths[pathKey] = struct{}{}
+		for _, candidate := range endpoint.PublicPaths {
+			if MatchesPublicPath([]string{candidate}, provider.Path) || MatchesPublicPath([]string{provider.Path}, candidate) {
+				return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: MCP provider %q path %q overlaps public path %q", provider.Name, provider.Path, candidate))
+			}
+		}
+	}
+	seenSkills := make(map[string]struct{}, len(provides.Skills))
+	for index, skill := range provides.Skills {
+		if !providedNamePattern.MatchString(skill) {
+			return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: provides.skills[%d] must match %s", index, providedNamePattern.String()))
+		}
+		if _, exists := seenSkills[skill]; exists {
+			return withGateRule("MPK-MANIFEST-PROVIDES", fmt.Errorf("manifest: duplicate skill %q", skill))
+		}
+		seenSkills[skill] = struct{}{}
+	}
+	slices.Sort(provides.Skills)
+	return nil
+}
+
+func validateMCPPath(value string) error {
+	if value == "" || value[0] != '/' {
+		return fmt.Errorf("must start with /")
+	}
+	if value == "/" {
+		return fmt.Errorf("must not be /")
+	}
+	if len(value) > 256 {
+		return fmt.Errorf("must be at most 256 bytes")
+	}
+	if strings.ContainsAny(value, "?#") {
+		return fmt.Errorf("must not contain a query or fragment")
+	}
+	if strings.Contains(value, `\\`) {
+		return fmt.Errorf("must not contain a backslash")
+	}
+	if strings.Contains(value, "%") {
+		return fmt.Errorf("must not contain percent-encoding")
+	}
+	if path.Clean(value) != value {
+		return fmt.Errorf("must be canonical without empty, current or parent segments")
+	}
+	return nil
+}
+
+// ValidateManifest 对外暴露与 MPK 门禁相同的 manifest 语义校验。
+// 商店的轻量预检、平台安装和开发工具都必须调用这一入口，避免在完整包下载前
+// 产生一套与实际 MPK 校验不同的“近似规则”。调用方应保存校验过程中补齐的
+// 派生字段（例如 Capabilities 和规范化的 public_paths）。
 func ValidateManifest(manifest *Manifest) error {
 	if manifest == nil {
 		return fmt.Errorf("manifest: manifest is required")
@@ -644,6 +788,8 @@ func validateManifestSettings(settings []Setting) error {
 			return fmt.Errorf("manifest: duplicate setting key %q", setting.Key)
 		}
 		seen[setting.Key] = struct{}{}
+		// default 是应用可直接安装的运行值。YAML 解析会记录显式空值；
+		// 旧的内存构造值仍以非空 Default 视为已提供，避免破坏内部快照读取。
 		if !setting.DefaultSet && setting.Default == "" {
 			return fmt.Errorf("manifest: setting %q must declare a default", setting.Key)
 		}
@@ -828,7 +974,7 @@ func validateServicePlaceholder(serviceName string, service ManifestService, nam
 	return nil
 }
 
-func validateServiceCapabilities(services map[string]ManifestService, models map[string]ModelSlot) ([]string, error) {
+func validateServiceCapabilities(services map[string]ManifestService, models map[string]ModelSlot, settings []Setting) ([]string, error) {
 	usedSlots := make(map[string]struct{}, len(models))
 	for slot, declaration := range models {
 		if !modelSlotPattern.MatchString(slot) {
@@ -875,6 +1021,38 @@ func validateServiceCapabilities(services map[string]ManifestService, models map
 			if capability != "model-gateway" && len(request.Slots) != 0 {
 				return nil, fmt.Errorf("manifest: capability %q on service %q cannot declare model slots", capability, serviceName)
 			}
+			if capability != "runtime-config" && (len(request.Settings) != 0 || len(request.Events) != 0) {
+				return nil, fmt.Errorf("manifest: capability %q on service %q cannot declare runtime config fields", capability, serviceName)
+			}
+			if capability == "runtime-config" {
+				seenSettings := make(map[string]struct{}, len(request.Settings))
+				for _, setting := range request.Settings {
+					setting = strings.TrimSpace(setting)
+					if setting == "" {
+						return nil, fmt.Errorf("manifest: service %q runtime-config settings cannot contain an empty key", serviceName)
+					}
+					if _, duplicate := seenSettings[setting]; duplicate {
+						return nil, fmt.Errorf("manifest: service %q runtime-config setting %q is duplicated", serviceName, setting)
+					}
+					if _, declared := settingByKey(settings, setting); !declared {
+						return nil, fmt.Errorf("manifest: service %q runtime-config references undeclared setting %q", serviceName, setting)
+					}
+					seenSettings[setting] = struct{}{}
+				}
+				for event, argv := range request.Events {
+					if _, allowed := RuntimeConfigEvents[event]; !allowed {
+						return nil, fmt.Errorf("manifest: service %q runtime-config event %q is unsupported", serviceName, event)
+					}
+					if len(argv) == 0 || strings.TrimSpace(argv[0]) == "" || !strings.HasPrefix(argv[0], "/") {
+						return nil, fmt.Errorf("manifest: service %q runtime-config event %q must start with an absolute executable path", serviceName, event)
+					}
+					for index, argument := range argv {
+						if strings.TrimSpace(argument) == "" {
+							return nil, fmt.Errorf("manifest: service %q runtime-config event %q argument %d is empty", serviceName, event, index)
+						}
+					}
+				}
+			}
 			if capability == "model-gateway" && len(request.Slots) == 0 {
 				return nil, fmt.Errorf("manifest: service %q model-gateway capability requires at least one slot", serviceName)
 			}
@@ -898,6 +1076,15 @@ func validateServiceCapabilities(services map[string]ManifestService, models map
 	}
 	slices.Sort(result)
 	return result, nil
+}
+
+func settingByKey(settings []Setting, key string) (Setting, bool) {
+	for _, setting := range settings {
+		if setting.Key == key {
+			return setting, true
+		}
+	}
+	return Setting{}, false
 }
 
 // validateServiceEndpoints 校验 endpoint 的最小运行不变量；Compose 引用在读取架构文件后校验。

@@ -38,6 +38,71 @@ type packageAssetRule struct {
 	height         int
 }
 
+// assetsFromSinglePassFiles 校验单趟扫描器已经捕获的资源成员，不重新打开 MPK。
+// 商店门禁使用它把扫描事实转换为可持久化的资源对象。
+func assetsFromSinglePassFiles(manifest Manifest, files map[string][]byte) ([]PackageAsset, error) {
+	if len(manifest.Screenshots) > MaxScreenshotCount {
+		return nil, fmt.Errorf("mpk: screenshots exceed %d entries", MaxScreenshotCount)
+	}
+	rules := map[string]packageAssetRule{
+		icon64Name:  {maxSize: MaxIcon64Size, expectedFormat: "png", width: 64, height: 64},
+		icon256Name: {maxSize: MaxIcon256Size, expectedFormat: "png", width: 256, height: 256},
+	}
+	for _, name := range manifest.Screenshots {
+		if err := ValidateScreenshotPath(name); err != nil {
+			return nil, err
+		}
+		if _, duplicate := rules[name]; duplicate {
+			return nil, fmt.Errorf("mpk: duplicate screenshot %q", name)
+		}
+		rules[name] = packageAssetRule{maxSize: MaxScreenshotSize, expectedFormat: screenshotFormat(name)}
+	}
+	orderedNames := make([]string, 0, len(rules))
+	orderedNames = append(orderedNames, icon64Name, icon256Name)
+	orderedNames = append(orderedNames, manifest.Screenshots...)
+	assets := make([]PackageAsset, 0, len(orderedNames))
+	for _, name := range orderedNames {
+		content, exists := files[name]
+		if !exists || content == nil {
+			return nil, fmt.Errorf("mpk: required asset %q does not exist", name)
+		}
+		asset, err := validatePackageAsset(name, content, rules[name])
+		if err != nil {
+			return nil, err
+		}
+		assets = append(assets, asset)
+	}
+	return assets, nil
+}
+
+func validatePackageAsset(name string, content []byte, rule packageAssetRule) (PackageAsset, error) {
+	if int64(len(content)) > rule.maxSize {
+		return PackageAsset{}, fmt.Errorf("mpk: asset %q exceeds %d bytes", name, rule.maxSize)
+	}
+	configuration, format, err := image.DecodeConfig(bytes.NewReader(content))
+	if err != nil {
+		return PackageAsset{}, fmt.Errorf("mpk: asset %q is not a supported image: %w", name, err)
+	}
+	if format != rule.expectedFormat {
+		return PackageAsset{}, fmt.Errorf("mpk: asset %q format %q does not match %q", name, format, rule.expectedFormat)
+	}
+	if rule.width > 0 && (configuration.Width != rule.width || configuration.Height != rule.height) {
+		return PackageAsset{}, fmt.Errorf("mpk: asset %q dimensions are %dx%d, want %dx%d", name, configuration.Width, configuration.Height, rule.width, rule.height)
+	}
+	if strings.HasPrefix(name, "icons/") {
+		decoded, _, err := image.Decode(bytes.NewReader(content))
+		if err != nil {
+			return PackageAsset{}, fmt.Errorf("mpk: asset %q cannot be decoded: %w", name, err)
+		}
+		switch decoded.(type) {
+		case *image.RGBA, *image.NRGBA, *image.RGBA64, *image.NRGBA64:
+		default:
+			return PackageAsset{}, fmt.Errorf("mpk: asset %q must be RGBA PNG with alpha", name)
+		}
+	}
+	return PackageAsset{Name: name, MediaType: "image/" + rule.expectedFormat, Content: content}, nil
+}
+
 // InspectPackageAssets 顺序扫描 MPK，只提取并校验固定图标和 manifest 声明的截图。
 // 返回顺序固定为 64 图标、256 图标、manifest 截图顺序。
 func InspectPackageAssets(reader io.ReadSeeker, manifest Manifest) ([]PackageAsset, error) {

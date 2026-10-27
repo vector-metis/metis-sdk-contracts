@@ -59,6 +59,7 @@ services:
     endpoints: [{name: web, protocol: http, container_port: 8080}]
 `,
 		"about.md":             "# Demo\n",
+		"release-notes.md":     "## 修复\n\n- 修复示例问题。\n",
 		"compose.amd64.yaml":   compose,
 		"images/amd64/web.tar": strings.Repeat("x", 8<<20),
 	})
@@ -67,11 +68,35 @@ services:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Manifest.ID != "demo-a7x2m" || metadata.Manifest.Version != "1.0.0" || metadata.AboutMD != "# Demo\n" {
+	if metadata.Manifest.ID != "demo-a7x2m" || metadata.Manifest.Version != "1.0.0" || metadata.AboutMD != "# Demo\n" || metadata.ReleaseNotesMD != "## 修复\n\n- 修复示例问题。\n" {
 		t.Fatalf("metadata = %+v", metadata)
 	}
-	if len(metadata.Settings) != 0 || metadata.Compose["amd64"] != compose || metadata.FileCount != 4 {
+	if len(metadata.Settings) != 0 || metadata.Compose["amd64"] != compose || metadata.FileCount != 5 {
 		t.Fatalf("metadata contract files = %+v", metadata)
+	}
+}
+
+func TestInspectPackageMetadataRejectsInvalidReleaseNotesUTF8(t *testing.T) {
+	t.Parallel()
+	entries := []metadataEntry{
+		{name: "manifest.yaml", content: `schema_version: 1
+id: notes-app-a7x2m
+version: 1.0.0
+display_name: Notes
+arch: [amd64]
+dependencies: []
+type: web
+services:
+  web:
+    lifecycle: {restart: unless-stopped}
+    endpoints: [{name: web, protocol: http, container_port: 8080}]
+`},
+		{name: "compose.amd64.yaml", content: "services:\n  web:\n    image: notes-app-a7x2m/web:1.0.0\n"},
+		{name: "release-notes.md", content: string([]byte{0xff, 0xfe})},
+	}
+	_, err := contract.InspectPackageMetadata(bytes.NewReader(metadataPackageEntries(t, entries)), "notes-app-a7x2m", "1.0.0")
+	if err == nil || !strings.Contains(err.Error(), "release-notes.md is not valid UTF-8") {
+		t.Fatalf("InspectPackageMetadata() error = %v, want invalid release notes UTF-8", err)
 	}
 }
 

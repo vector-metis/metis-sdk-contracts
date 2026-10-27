@@ -46,11 +46,12 @@ var ErrOverlayNotFound = errors.New("mpk: overlay not found")
 
 // PackageSummary 是 MPK 校验成功后返回的制品摘要。
 type PackageSummary struct {
-	Manifest  Manifest
-	Size      int64
-	SHA256    string
-	AboutMD   string
-	FileCount int
+	Manifest       Manifest
+	Size           int64
+	SHA256         string
+	AboutMD        string
+	ReleaseNotesMD string
+	FileCount      int
 }
 
 // ValidateOptions 携带服务侧事实参与校验；校验器保持纯函数，不访问数据库或对象存储。
@@ -73,11 +74,12 @@ func ValidateMPK(reader io.ReadSeeker, options ValidateOptions) (*PackageSummary
 		return nil, err
 	}
 	return &PackageSummary{
-		Manifest:  result.Metadata.Manifest,
-		Size:      result.Size,
-		SHA256:    result.SHA256,
-		AboutMD:   result.Metadata.AboutMD,
-		FileCount: result.Metadata.FileCount,
+		Manifest:       result.Metadata.Manifest,
+		Size:           result.Size,
+		SHA256:         result.SHA256,
+		AboutMD:        result.Metadata.AboutMD,
+		ReleaseNotesMD: result.Metadata.ReleaseNotesMD,
+		FileCount:      result.Metadata.FileCount,
 	}, nil
 }
 
