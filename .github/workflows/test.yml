@@ -16,7 +16,9 @@ jobs:
         run: docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:v8.28.0 detect --source=/repo --no-banner --redact
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25.x'
+          # govulncheck analyzes the standard library too; keep it on the
+          # patched version used by the release validation.
+          go-version: '1.26.10'
       - run: test -s LICENSE
       - run: go test ./...
       - run: go vet ./...
